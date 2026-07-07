@@ -179,4 +179,24 @@ mod tests {
         let restored = StateStore::from_json(&s.to_json()).unwrap();
         assert_eq!(restored.sessions()[0].session_name.as_deref(), Some("myproj"));
     }
+
+    #[test]
+    fn waiting_input_session_serializes_flattened() {
+        // Task 7 渲染和 Task 9 e2e 都依赖这个扁平形状：
+        // {"pane_id":"%1","state":"waiting_input","reason":"perm",...}
+        let sess = AgentSession {
+            pane_id: "%1".into(),
+            agent: AgentKind::Claude,
+            session_name: None,
+            state: SessionState::WaitingInput { reason: "perm".into() },
+            state_since_ms: 100,
+            current_task: None,
+            cwd: None,
+            last_activity_ms: 100,
+        };
+        let json = serde_json::to_string(&sess).unwrap();
+        assert!(json.contains(r#""state":"waiting_input""#), "json was: {json}");
+        assert!(json.contains(r#""reason":"perm""#), "json was: {json}");
+        assert!(json.contains(r#""pane_id""#), "json was: {json}");
+    }
 }
