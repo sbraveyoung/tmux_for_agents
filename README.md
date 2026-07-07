@@ -10,7 +10,7 @@ for you, who's done — in your status bar.
 Claude Code integration (inside claude):
 
     /plugin marketplace add ~/code/src/github.com/sbraveyoung/tmux_for_agents
-    /plugin install tfa
+    /plugin install tfa@tfa
 
 tmux status bar (~/.tmux.conf):
 

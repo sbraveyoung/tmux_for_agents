@@ -1,0 +1,13 @@
+{
+  "name": "tfa",
+  "owner": {
+    "name": "sbraveyoung"
+  },
+  "plugins": [
+    {
+      "name": "tfa",
+      "source": "./",
+      "description": "tmux for agents — report Claude Code lifecycle events to the tfa daemon"
+    }
+  ]
+}
