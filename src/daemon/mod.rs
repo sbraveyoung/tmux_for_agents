@@ -55,6 +55,8 @@ pub fn run() -> anyhow::Result<()> {
         });
     }
 
+    crate::scanner::spawn(Arc::clone(&store), Arc::clone(&dirty));
+
     let listener = UnixListener::bind(&sock_path)?;
     server::serve(listener, store, dirty); // 阻塞 accept 循环
     Ok(())

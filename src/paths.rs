@@ -21,6 +21,15 @@ pub fn state_dir() -> PathBuf {
 pub fn snapshot_path() -> PathBuf { state_dir().join("snapshot.json") }
 pub fn lock_path() -> PathBuf { state_dir().join("daemon.lock") }
 
+/// Root directory holding claude's per-project transcript directories
+/// (`<projects_dir>/<encode_cwd(cwd)>/*.jsonl`).
+pub fn projects_dir() -> PathBuf {
+    env_path("TFA_CLAUDE_PROJECTS_DIR").unwrap_or_else(|| {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        home.join(".claude/projects")
+    })
+}
+
 /// tmux 调用的额外参数（隔离测试用 -L <name>）
 pub fn tmux_args() -> Vec<String> {
     match std::env::var("TFA_TMUX_SOCKET") {
@@ -80,5 +89,15 @@ mod tests {
         std::env::set_var("TFA_TMUX_SOCKET", "");
         assert_eq!(tmux_args(), Vec::<String>::new());
         std::env::remove_var("TFA_TMUX_SOCKET");
+
+        // Test 10: TFA_CLAUDE_PROJECTS_DIR explicitly set
+        std::env::set_var("TFA_CLAUDE_PROJECTS_DIR", "/p/projects");
+        assert_eq!(projects_dir(), PathBuf::from("/p/projects"));
+        std::env::remove_var("TFA_CLAUDE_PROJECTS_DIR");
+
+        // Test 11: TFA_CLAUDE_PROJECTS_DIR unset → defaults to $HOME/.claude/projects
+        assert!(std::env::var("TFA_CLAUDE_PROJECTS_DIR").is_err());
+        let projects = projects_dir();
+        assert!(projects.to_string_lossy().ends_with(".claude/projects"));
     }
 }
