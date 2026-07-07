@@ -9,6 +9,9 @@ mod protocol;
 mod render;
 mod state;
 
+#[allow(dead_code)] // consumed by scanner from Task 4 onward
+mod sources;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
