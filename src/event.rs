@@ -112,4 +112,32 @@ mod tests {
         let ev = AgentEvent::from_hook("hermes", "stop", "%1", &serde_json::Value::Null, 0).unwrap();
         assert!(matches!(ev.agent, AgentKind::Custom(ref n) if n == "hermes"));
     }
+
+    #[test]
+    fn prompt_truncation_is_char_safe_on_multibyte() {
+        let p = "字".repeat(300);
+        let payload = json!({ "prompt": p });
+        let ev = AgentEvent::from_hook("claude", "user-prompt-submit", "%1", &payload, 0).unwrap();
+        assert_eq!(ev.prompt.as_ref().unwrap().chars().count(), 120);
+    }
+
+    #[test]
+    fn agent_kind_mapping_table() {
+        assert_eq!(AgentKind::parse("codex"), AgentKind::Codex);
+        assert_eq!(AgentKind::parse("claude"), AgentKind::Claude);
+        assert_eq!(AgentKind::Codex.label(), "codex");
+        assert_eq!(AgentKind::Claude.label(), "claude");
+        assert_eq!(AgentKind::Custom("hermes".to_string()).label(), "hermes");
+    }
+
+    #[test]
+    fn event_kind_mapping_table() {
+        assert_eq!(EventKind::parse("session-start"), Some(EventKind::SessionStart));
+        assert_eq!(EventKind::parse("user-prompt-submit"), Some(EventKind::UserPromptSubmit));
+        assert_eq!(EventKind::parse("notification"), Some(EventKind::Notification));
+        assert_eq!(EventKind::parse("stop"), Some(EventKind::Stop));
+        assert_eq!(EventKind::parse("session-end"), Some(EventKind::SessionEnd));
+        assert_eq!(EventKind::parse("activity"), Some(EventKind::Activity));
+        assert_eq!(EventKind::parse("post-tool-use"), Some(EventKind::Activity));
+    }
 }
