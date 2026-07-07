@@ -62,7 +62,18 @@ pub fn tick(
     cursor_paths: &mut HashMap<String, PathBuf>,
     now_ms: u64,
 ) -> bool {
-    let panes = procs::list_panes();
+    // list_panes→lock TOCTOU: a pane can get hooked between this snapshot and
+    // the state-store lock below, so a brand-new hook-reported session can be
+    // absent from `live` and get marked Dead for (at most) this one round;
+    // the next Activity hook or scan tick self-heals it via the Dead-revive
+    // path in reconcile_liveness. Accepted — narrower and cheaper than
+    // holding the lock across the tmux/ps subprocess calls.
+    let Some(panes) = procs::list_panes() else {
+        // tmux command itself failed (not just "zero panes") — treat as
+        // transient and skip the round rather than mass-mark every session
+        // Dead off a single flaky invocation (F1).
+        return false;
+    };
     if panes.is_empty() && !crate::daemon::lifecycle::tmux_alive() {
         // Can't tell "tmux is down" apart from "tmux has no panes" from
         // list_panes' empty Vec alone — skip this round to avoid falsely

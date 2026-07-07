@@ -78,14 +78,23 @@ pub fn find_agent(pane_pid: u32, procs: &[ProcEntry]) -> Option<(AgentKind, u32)
     None
 }
 
-pub fn list_panes() -> Vec<PaneInfo> {
+/// `None` means the `tmux` command itself failed (couldn't run, or exited
+/// non-zero — e.g. no server at the target socket). Callers must not treat
+/// that the same as "queried fine, zero panes": tick()'s reconcile_liveness
+/// would otherwise mass-mark every live session Dead off a single transient
+/// tmux hiccup (F1).
+fn list_panes_with_args(extra: &[String]) -> Option<Vec<PaneInfo>> {
     let mut cmd = std::process::Command::new("tmux");
-    cmd.args(paths::tmux_args());
+    cmd.args(extra);
     cmd.args(["list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{session_name}"]);
     match cmd.output() {
-        Ok(out) if out.status.success() => parse_panes(&String::from_utf8_lossy(&out.stdout)),
-        _ => Vec::new(),
+        Ok(out) if out.status.success() => Some(parse_panes(&String::from_utf8_lossy(&out.stdout))),
+        _ => None,
     }
+}
+
+pub fn list_panes() -> Option<Vec<PaneInfo>> {
+    list_panes_with_args(&paths::tmux_args())
 }
 
 pub fn list_procs() -> Vec<ProcEntry> {
@@ -127,6 +136,16 @@ mod tests {
         assert_eq!(classify("tmux-agent-sidebar --collector"), None);
         assert_eq!(classify("-zsh"), None);
         assert_eq!(classify("/bin/zsh -il"), None);
+    }
+
+    #[test]
+    fn list_panes_with_args_returns_none_on_command_failure() {
+        // 指向一个根本不存在的 tmux server：tmux 直接以非零退出连接失败（不会
+        // 自动起 server）——list_panes 必须区分「命令失败」和「查询成功但 0
+        // 个 pane」，返回 None 而非空 Vec，否则 tick() 会把它误判成「tmux
+        // 没有任何 pane」从而对所有会话做批量 liveness 纠偏（F1）。
+        // 不设环境变量，直接传参数，避免和其它测试的环境变量竞态。
+        assert!(list_panes_with_args(&["-L".into(), "tfa-no-such-server-xyz".into()]).is_none());
     }
 
     #[test]
