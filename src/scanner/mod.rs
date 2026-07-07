@@ -149,5 +149,26 @@ pub fn tick(
                 .set_metrics(&pane_id, m);
         }
     }
+    // —— codex 指标 ——
+    let codex_targets: Vec<(String, Option<String>)> = {
+        let st = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        st.sessions().iter()
+            .filter(|s| matches!(s.agent, crate::event::AgentKind::Codex)
+                && !matches!(s.state, crate::state::SessionState::Dead))
+            .map(|s| (s.pane_id.clone(), s.cwd.clone()))
+            .collect()
+    };
+    if !codex_targets.is_empty() {
+        let threads = crate::sources::codex_db::load_recent(200);
+        if !threads.is_empty() {
+            let mut st = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (pane_id, cwd) in codex_targets {
+                let Some(cwd) = cwd.as_deref() else { continue };
+                if let Some(m) = crate::sources::codex_db::metrics_for(&threads, cwd) {
+                    st.set_metrics(&pane_id, m);
+                }
+            }
+        }
+    }
     true
 }
