@@ -60,6 +60,8 @@ pub struct AgentEvent {
     pub prompt: Option<String>,
     pub cwd: Option<String>,
     pub at_ms: u64,
+    pub transcript_path: Option<String>,
+    pub session_id: Option<String>,
 }
 
 fn str_field(payload: &Value, key: &str) -> Option<String> {
@@ -77,6 +79,8 @@ impl AgentEvent {
             prompt: str_field(payload, "prompt").map(|p| p.chars().take(120).collect()),
             cwd: str_field(payload, "cwd"),
             at_ms,
+            transcript_path: str_field(payload, "transcript_path"),
+            session_id: str_field(payload, "session_id"),
         })
     }
 }

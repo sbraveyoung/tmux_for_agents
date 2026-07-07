@@ -58,6 +58,14 @@ mod tests {
             pane_id: pane.into(), agent: AgentKind::Claude,
             session_name: name.map(String::from), state,
             state_since_ms: since, current_task: None, cwd: None, last_activity_ms: since,
+            source: crate::state::Source::Hook,
+            pid: None,
+            model: None,
+            context: None,
+            tokens: None,
+            git_branch: None,
+            transcript_path: None,
+            agent_session_id: None,
         }
     }
 

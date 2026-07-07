@@ -3,6 +3,42 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const DEAD_RETENTION_MS: u64 = 300_000;
+#[allow(dead_code)] // part of M2 interface; used by scanner task
+pub const STALE_AFTER_MS: u64 = 300_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Source {
+    #[default]
+    Hook,
+    Scan,
+    Both,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextUsage {
+    pub used_tokens: u64,
+    pub max_tokens: Option<u64>,
+    pub percent: Option<u8>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TokenTotals {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_creation: u64,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+#[allow(dead_code)] // part of M2 interface; used by metrics/scanner tasks
+pub struct SessionMetrics {
+    pub model: Option<String>,
+    pub context: Option<ContextUsage>,
+    pub tokens: Option<TokenTotals>,
+    pub git_branch: Option<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -26,6 +62,22 @@ pub struct AgentSession {
     pub current_task: Option<String>,
     pub cwd: Option<String>,
     pub last_activity_ms: u64,
+    #[serde(default)]
+    pub source: Source,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub context: Option<ContextUsage>,
+    #[serde(default)]
+    pub tokens: Option<TokenTotals>,
+    #[serde(default)]
+    pub git_branch: Option<String>,
+    #[serde(default)]
+    pub transcript_path: Option<String>,
+    #[serde(default)]
+    pub agent_session_id: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -33,23 +85,53 @@ pub struct StateStore {
     sessions: BTreeMap<String, AgentSession>,
 }
 
+fn fresh_session(pane_id: &str, agent: AgentKind, source: Source, at_ms: u64) -> AgentSession {
+    AgentSession {
+        pane_id: pane_id.to_string(),
+        agent,
+        session_name: None,
+        state: if matches!(source, Source::Scan) { SessionState::Working } else { SessionState::Starting },
+        state_since_ms: at_ms,
+        current_task: None,
+        cwd: None,
+        last_activity_ms: at_ms,
+        source,
+        pid: None,
+        model: None,
+        context: None,
+        tokens: None,
+        git_branch: None,
+        transcript_path: None,
+        agent_session_id: None,
+    }
+}
+
 impl StateStore {
     #[allow(dead_code)] // documented ctor in the M1 interface; production call site now uses unwrap_or_default()
     pub fn new() -> Self { Self::default() }
 
     pub fn apply(&mut self, ev: AgentEvent) {
-        let entry = self.sessions.entry(ev.pane_id.clone()).or_insert_with(|| AgentSession {
-            pane_id: ev.pane_id.clone(),
-            agent: ev.agent.clone(),
-            session_name: None,
-            state: SessionState::Starting,
-            state_since_ms: ev.at_ms,
-            current_task: None,
-            cwd: None,
-            last_activity_ms: ev.at_ms,
+        // pane 复用漂移：同 pane 不同 agent → 整条重建
+        if let Some(existing) = self.sessions.get(&ev.pane_id) {
+            if existing.agent != ev.agent {
+                self.sessions.insert(ev.pane_id.clone(), fresh_session(&ev.pane_id, ev.agent.clone(), Source::Hook, ev.at_ms));
+            }
+        }
+        // SessionStart 元数据重置：已知 pane 开新会话，不继承旧任务/指标
+        if matches!(ev.kind, EventKind::SessionStart) && self.sessions.contains_key(&ev.pane_id) {
+            let name = self.sessions.get(&ev.pane_id).and_then(|s| s.session_name.clone());
+            let mut fresh = fresh_session(&ev.pane_id, ev.agent.clone(), Source::Hook, ev.at_ms);
+            fresh.session_name = name; // tmux session 名跟 pane 走，保留
+            self.sessions.insert(ev.pane_id.clone(), fresh);
+        }
+        let entry = self.sessions.entry(ev.pane_id.clone()).or_insert_with(|| {
+            fresh_session(&ev.pane_id, ev.agent.clone(), Source::Hook, ev.at_ms)
         });
         entry.last_activity_ms = ev.at_ms;
+        if matches!(entry.source, Source::Scan) { entry.source = Source::Both; }
         if let Some(cwd) = ev.cwd { entry.cwd = Some(cwd); }
+        if let Some(t) = ev.transcript_path { entry.transcript_path = Some(t); }
+        if let Some(id) = ev.session_id { entry.agent_session_id = Some(id); }
 
         let next = match ev.kind {
             EventKind::SessionStart => Some(SessionState::Starting),
@@ -68,6 +150,73 @@ impl StateStore {
             entry.state = state;
             entry.state_since_ms = ev.at_ms;
         }
+    }
+
+    #[allow(dead_code)] // part of M2 interface; used by scanner task
+    pub fn upsert_scanned(&mut self, pane_id: &str, agent: AgentKind, pid: u32, cwd: &str, session_name: &str, now_ms: u64) {
+        // 漂移检查同 apply
+        if let Some(existing) = self.sessions.get(pane_id) {
+            if existing.agent != agent {
+                self.sessions.insert(pane_id.to_string(), fresh_session(pane_id, agent.clone(), Source::Scan, now_ms));
+            }
+        }
+        let entry = self.sessions.entry(pane_id.to_string())
+            .or_insert_with(|| fresh_session(pane_id, agent.clone(), Source::Scan, now_ms));
+        entry.pid = Some(pid);
+        if entry.cwd.is_none() { entry.cwd = Some(cwd.to_string()); }
+        if entry.session_name.is_none() { entry.session_name = Some(session_name.to_string()); }
+        if matches!(entry.source, Source::Hook) { entry.source = Source::Both; }
+    }
+
+    #[allow(dead_code)] // part of M2 interface; used by scanner task
+    pub fn reconcile_liveness(&mut self, live: &BTreeMap<String, Option<u32>>, now_ms: u64) {
+        for s in self.sessions.values_mut() {
+            if matches!(s.state, SessionState::Dead) { continue; }
+            match live.get(&s.pane_id) {
+                Some(Some(pid)) => { s.pid = Some(*pid); }
+                Some(None) | None => {
+                    s.state = SessionState::Dead;
+                    s.state_since_ms = now_ms;
+                }
+            }
+        }
+    }
+
+    #[allow(dead_code)] // part of M2 interface; used by scanner task
+    pub fn stale_sweep(&mut self, now_ms: u64) {
+        for s in self.sessions.values_mut() {
+            if matches!(s.state, SessionState::Working)
+                && now_ms.saturating_sub(s.last_activity_ms) > STALE_AFTER_MS
+            {
+                s.state = SessionState::Stale;
+                s.state_since_ms = now_ms;
+            }
+        }
+    }
+
+    #[allow(dead_code)] // part of M2 interface; used by metrics/scanner tasks
+    pub fn set_metrics(&mut self, pane_id: &str, m: SessionMetrics) {
+        if let Some(s) = self.sessions.get_mut(pane_id) {
+            if m.model.is_some() { s.model = m.model; }
+            if m.context.is_some() { s.context = m.context; }
+            if m.tokens.is_some() { s.tokens = m.tokens; }
+            if m.git_branch.is_some() { s.git_branch = m.git_branch; }
+        }
+    }
+
+    #[allow(dead_code)] // part of M2 interface; used by later tasks
+    pub fn set_transcript(&mut self, pane_id: &str, path: String) {
+        if let Some(s) = self.sessions.get_mut(pane_id) {
+            if s.transcript_path.is_none() { s.transcript_path = Some(path); }
+        }
+    }
+
+    #[allow(dead_code)] // part of M2 interface; used by scanner task
+    pub fn panes_needing_name(&self) -> Vec<String> {
+        self.sessions.values()
+            .filter(|s| s.session_name.is_none())
+            .map(|s| s.pane_id.clone())
+            .collect()
     }
 
     pub fn prune(&mut self, now_ms: u64) {
@@ -105,6 +254,7 @@ mod tests {
         AgentEvent {
             agent: AgentKind::Claude, pane_id: "%1".into(), kind,
             reason: None, prompt: None, cwd: None, at_ms,
+            transcript_path: None, session_id: None,
         }
     }
 
@@ -194,10 +344,160 @@ mod tests {
             current_task: None,
             cwd: None,
             last_activity_ms: 100,
+            source: Source::Hook,
+            pid: None,
+            model: None,
+            context: None,
+            tokens: None,
+            git_branch: None,
+            transcript_path: None,
+            agent_session_id: None,
         };
         let json = serde_json::to_string(&sess).unwrap();
         assert!(json.contains(r#""state":"waiting_input""#), "json was: {json}");
         assert!(json.contains(r#""reason":"perm""#), "json was: {json}");
         assert!(json.contains(r#""pane_id""#), "json was: {json}");
+    }
+
+    #[test]
+    fn m1_snapshot_still_loads() {
+        // M1 生产快照的真实形状（无 M2 字段）——升级后必须能加载
+        let m1_json = r#"{"sessions":{"%1":{"pane_id":"%1","agent":"claude","session_name":"api","state":"working","state_since_ms":100,"current_task":"fix","cwd":"/tmp/p","last_activity_ms":200}}}"#;
+        let store = StateStore::from_json(m1_json).unwrap();
+        let s = &store.sessions()[0];
+        assert!(matches!(s.source, Source::Hook)); // default
+        assert!(s.model.is_none() && s.context.is_none() && s.tokens.is_none());
+    }
+
+    #[test]
+    fn metrics_serialize_shape() {
+        let m = SessionMetrics {
+            model: Some("claude-fable-5".into()),
+            context: Some(ContextUsage { used_tokens: 982869, max_tokens: Some(1_000_000), percent: Some(98) }),
+            tokens: Some(TokenTotals { input: 2, output: 1045, cache_read: 982162, cache_creation: 705, total: 983914 }),
+            git_branch: Some("main".into()),
+        };
+        let mut st = StateStore::new();
+        st.upsert_scanned("%9", AgentKind::Claude, 4242, "/tmp/p", "api", 1000);
+        st.set_metrics("%9", m);
+        let json = serde_json::to_string(&st.sessions()[0]).unwrap();
+        assert!(json.contains(r#""source":"scan""#), "json: {json}");
+        assert!(json.contains(r#""used_tokens":982869"#));
+        assert!(json.contains(r#""percent":98"#));
+        assert!(json.contains(r#""pid":4242"#));
+    }
+
+    #[test]
+    fn scanned_pane_starts_working_and_hook_upgrades_source() {
+        let mut st = StateStore::new();
+        st.upsert_scanned("%1", AgentKind::Claude, 42, "/tmp/p", "api", 1000);
+        let s = &st.sessions()[0];
+        assert!(matches!(s.state, SessionState::Working));
+        assert!(matches!(s.source, Source::Scan));
+        assert_eq!(s.session_name.as_deref(), Some("api"));
+        // 再收 hook 事件 → Both，状态被事件接管
+        st.apply(ev(EventKind::Stop, 2000));
+        let s = &st.sessions()[0];
+        assert!(matches!(s.source, Source::Both));
+        assert!(matches!(s.state, SessionState::Done));
+    }
+
+    #[test]
+    fn upsert_scanned_on_existing_entry_does_not_reset_state() {
+        let mut st = StateStore::new();
+        st.apply(ev(EventKind::Notification, 1000)); // WaitingInput via hook
+        st.upsert_scanned("%1", AgentKind::Claude, 42, "/tmp/p", "api", 2000);
+        let s = &st.sessions()[0];
+        assert!(matches!(s.state, SessionState::WaitingInput { .. }), "扫描确认不得覆盖事件状态");
+        assert!(matches!(s.source, Source::Both));
+        assert_eq!(s.pid, Some(42));
+    }
+
+    #[test]
+    fn agent_kind_drift_rebuilds_entry() {
+        let mut st = StateStore::new();
+        let mut e = ev(EventKind::UserPromptSubmit, 1000);
+        e.prompt = Some("old claude task".into());
+        st.apply(e);
+        // 同 pane 换了 agent（pane 复用）
+        let mut e2 = ev(EventKind::SessionStart, 2000);
+        e2.agent = AgentKind::Codex;
+        st.apply(e2);
+        let s = &st.sessions()[0];
+        assert!(matches!(s.agent, AgentKind::Codex));
+        assert!(s.current_task.is_none(), "旧任务必须清空");
+    }
+
+    #[test]
+    fn session_start_on_known_pane_resets_metadata() {
+        let mut st = StateStore::new();
+        let mut e = ev(EventKind::UserPromptSubmit, 1000);
+        e.prompt = Some("task A".into());
+        st.apply(e);
+        st.set_metrics("%1", SessionMetrics {
+            model: Some("claude-fable-5".into()), context: None, tokens: None, git_branch: None,
+        });
+        st.apply(ev(EventKind::SessionStart, 2000));
+        let s = &st.sessions()[0];
+        assert!(matches!(s.state, SessionState::Starting));
+        assert!(s.current_task.is_none() && s.model.is_none(), "新会话不得继承旧指标");
+    }
+
+    #[test]
+    fn reconcile_liveness_marks_dead() {
+        let mut st = StateStore::new();
+        st.apply(ev(EventKind::UserPromptSubmit, 1000));          // %1 working
+        st.upsert_scanned("%2", AgentKind::Claude, 7, "/p", "s", 1000);
+        let mut live = std::collections::BTreeMap::new();
+        live.insert("%2".to_string(), None::<u32>);               // pane 在、进程没了
+        // %1 不在 map → pane 已消失
+        st.reconcile_liveness(&live, 5000);
+        let sessions = st.sessions();
+        assert!(sessions.iter().all(|s| matches!(s.state, SessionState::Dead)));
+        assert!(sessions.iter().all(|s| s.state_since_ms == 5000));
+    }
+
+    #[test]
+    fn reconcile_liveness_leaves_live_and_dead_alone() {
+        let mut st = StateStore::new();
+        st.apply(ev(EventKind::SessionEnd, 1000)); // 已 Dead
+        let mut live = std::collections::BTreeMap::new();
+        live.insert("%1".to_string(), Some(9u32));
+        st.reconcile_liveness(&live, 5000);
+        // 已 Dead 的不被复活也不重置 state_since（否则 prune 永不触发）
+        let s = &st.sessions()[0];
+        assert!(matches!(s.state, SessionState::Dead));
+        assert_eq!(s.state_since_ms, 1000);
+    }
+
+    #[test]
+    fn stale_sweep_flags_quiet_working_sessions() {
+        let mut st = StateStore::new();
+        st.apply(ev(EventKind::UserPromptSubmit, 1000)); // last_activity=1000
+        st.stale_sweep(1000 + STALE_AFTER_MS + 1);
+        assert!(matches!(st.sessions()[0].state, SessionState::Stale));
+        // Stale 后新事件照常接管
+        st.apply(ev(EventKind::Stop, 999_999));
+        assert!(matches!(st.sessions()[0].state, SessionState::Done));
+    }
+
+    #[test]
+    fn hook_event_stores_transcript_and_session_id() {
+        let mut st = StateStore::new();
+        let mut e = ev(EventKind::SessionStart, 1000);
+        e.transcript_path = Some("/tmp/t.jsonl".into());
+        e.session_id = Some("abc-123".into());
+        st.apply(e);
+        let s = &st.sessions()[0];
+        assert_eq!(s.transcript_path.as_deref(), Some("/tmp/t.jsonl"));
+        assert_eq!(s.agent_session_id.as_deref(), Some("abc-123"));
+    }
+
+    #[test]
+    fn panes_needing_name_lists_unnamed_only() {
+        let mut st = StateStore::new();
+        st.apply(ev(EventKind::SessionStart, 0));                       // %1 无名
+        st.upsert_scanned("%2", AgentKind::Claude, 7, "/p", "named", 0); // %2 有名
+        assert_eq!(st.panes_needing_name(), vec!["%1".to_string()]);
     }
 }
