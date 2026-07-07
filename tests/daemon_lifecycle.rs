@@ -25,6 +25,7 @@ fn second_daemon_exits_immediately() {
     // 第一个还活着
     assert!(first.try_wait().unwrap().is_none());
     first.kill().unwrap();
+    first.wait().unwrap();
 }
 
 #[test]
@@ -71,4 +72,5 @@ fn snapshot_survives_restart() {
     BufReader::new(s).read_line(&mut line).unwrap();
     assert!(line.contains(r#""pane_id":"%5""#), "got: {line}");
     child.kill().unwrap();
+    child.wait().unwrap();
 }

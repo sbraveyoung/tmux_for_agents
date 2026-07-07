@@ -34,6 +34,7 @@ pub struct StateStore {
 }
 
 impl StateStore {
+    #[allow(dead_code)] // documented ctor in the M1 interface; production call site now uses unwrap_or_default()
     pub fn new() -> Self { Self::default() }
 
     pub fn apply(&mut self, ev: AgentEvent) {

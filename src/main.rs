@@ -3,7 +3,6 @@ mod commands;
 mod daemon;
 mod paths;
 
-#[allow(dead_code)] // AgentKind::label has no production consumer yet
 mod event;
 
 mod protocol;

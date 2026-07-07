@@ -64,5 +64,5 @@ fn load_or_default() -> StateStore {
     std::fs::read_to_string(paths::snapshot_path())
         .ok()
         .and_then(|s| StateStore::from_json(&s).ok())
-        .unwrap_or_else(StateStore::new)
+        .unwrap_or_default()
 }

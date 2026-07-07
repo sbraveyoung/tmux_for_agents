@@ -11,7 +11,7 @@ pub fn render_tmux(sessions: &[AgentSession], now_ms: u64) -> String {
             SessionState::Working | SessionState::Starting => working += 1,
             SessionState::WaitingInput { .. } => {
                 waiting += 1;
-                if oldest_wait.map_or(true, |o| s.state_since_ms < o.state_since_ms) {
+                if oldest_wait.is_none_or(|o| s.state_since_ms < o.state_since_ms) {
                     oldest_wait = Some(s);
                 }
             }

@@ -45,7 +45,7 @@ mod tests {
         std::env::remove_var("TFA_SOCKET");
 
         // Test 2: TFA_SOCKET unset → defaults to /tmp/tfa-<uid>/tfa.sock
-        assert!(!std::env::var("TFA_SOCKET").is_ok());
+        assert!(std::env::var("TFA_SOCKET").is_err());
         let path = socket_path();
         assert!(path.to_string_lossy().starts_with("/tmp/tfa-"));
         assert!(path.to_string_lossy().ends_with("/tfa.sock"));
@@ -73,7 +73,7 @@ mod tests {
         std::env::remove_var("TFA_TMUX_SOCKET");
 
         // Test 8: TFA_TMUX_SOCKET unset → empty vec
-        assert!(!std::env::var("TFA_TMUX_SOCKET").is_ok());
+        assert!(std::env::var("TFA_TMUX_SOCKET").is_err());
         assert_eq!(tmux_args(), Vec::<String>::new());
 
         // Test 9: TFA_TMUX_SOCKET="" (empty string) → empty vec

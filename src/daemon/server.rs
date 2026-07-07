@@ -49,7 +49,7 @@ fn respond(line: &str, store: &Mutex<StateStore>, dirty: &AtomicBool) -> Respons
                         st.apply(ev);
                         st.sessions().iter()
                             .find(|s| s.pane_id == pane)
-                            .map_or(false, |s| s.session_name.is_none())
+                            .is_some_and(|s| s.session_name.is_none())
                     };
                     if needs_name {
                         if let Some(name) = resolve_session_name(&pane) {
