@@ -58,3 +58,25 @@ fn malformed_request_returns_error_not_crash() {
     let snap = roundtrip(&sock, r#"{"op":"snapshot"}"#);
     assert!(snap.contains("snapshot"));
 }
+
+#[test]
+fn hook_without_pane_returns_missing_pane_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_guard, sock) = start_daemon(dir.path());
+    let resp = roundtrip(&sock, r#"{"op":"hook","agent":"claude","event":"stop","payload":{}}"#);
+    assert!(resp.contains(r#""result":"error""#), "got: {resp}");
+    assert!(resp.contains("missing pane"), "got: {resp}");
+}
+
+#[test]
+fn unknown_event_returns_error_over_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_guard, sock) = start_daemon(dir.path());
+    let resp = roundtrip(&sock,
+        r#"{"op":"hook","agent":"claude","event":"no-such-event","pane":"%1","payload":{}}"#);
+    assert!(resp.contains(r#""result":"error""#), "got: {resp}");
+    assert!(resp.contains("unknown event"), "got: {resp}");
+    // daemon 仍活着
+    let snap = roundtrip(&sock, r#"{"op":"snapshot"}"#);
+    assert!(snap.contains("snapshot"), "got: {snap}");
+}
