@@ -72,12 +72,22 @@ fn load_or_default() -> StateStore {
 
 /// socket 父目录必须 0700 且属主是当前用户——多用户共享的 /tmp 或
 /// $XDG_RUNTIME_DIR 上，宽松权限会让别的本地用户读到/连上这条控制通道。
+/// 用 DirBuilder::mode(0o700) 原子建目录，避免 create_dir_all → chmod
+/// 之间目录短暂停留在 umask 权限的 TOCTOU 窗口。
 fn ensure_socket_dir(dir: &std::path::Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    std::fs::create_dir_all(dir)?;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?; // recursive: 已存在时 Ok，不报错
+    // 已存在目录（老版本 create_dir_all 建的）统一收紧到 0700
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     let meta = std::fs::metadata(dir)?;
     let uid = unsafe { libc::getuid() };
-    anyhow::ensure!(meta.uid() == uid, "socket dir {} owned by uid {}, expected {}", dir.display(), meta.uid(), uid);
+    anyhow::ensure!(
+        meta.uid() == uid,
+        "socket dir {} owned by uid {}, expected {}",
+        dir.display(), meta.uid(), uid
+    );
     Ok(())
 }
