@@ -70,6 +70,9 @@ fn hook_autospawns_daemon_and_event_lands() {
     cmd.env("TFA_SOCKET", &sock)
         .env("TFA_STATE_DIR", dir.path())
         .env("TFA_SKIP_TMUX_CHECK", "1")
+        // autospawn 拉起的 daemon 继承本进程环境；指向不存在的 tmux server 让
+        // Hook 分支的 session-name 解析确定性地失败（None），不打到真实 tmux。
+        .env("TFA_TMUX_SOCKET", format!("tfa-test-none-{}", std::process::id()))
         .env("TMUX_PANE", "%8")
         .args(["hook", "claude", "user-prompt-submit"])
         .write_stdin(r#"{"prompt":"hello"}"#);

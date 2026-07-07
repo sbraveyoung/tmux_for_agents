@@ -43,7 +43,19 @@ fn respond(line: &str, store: &Mutex<StateStore>, dirty: &AtomicBool) -> Respons
             };
             match AgentEvent::from_hook(&agent, &event, &pane, &payload, super::now_ms()) {
                 Some(ev) => {
-                    store.lock().unwrap().apply(ev);
+                    let pane = ev.pane_id.clone();
+                    let needs_name = {
+                        let mut st = store.lock().unwrap();
+                        st.apply(ev);
+                        st.sessions().iter()
+                            .find(|s| s.pane_id == pane)
+                            .map_or(false, |s| s.session_name.is_none())
+                    };
+                    if needs_name {
+                        if let Some(name) = resolve_session_name(&pane) {
+                            store.lock().unwrap().set_session_name(&pane, name);
+                        }
+                    }
                     dirty.store(true, Ordering::Relaxed);
                     Response::Ok
                 }
@@ -55,4 +67,14 @@ fn respond(line: &str, store: &Mutex<StateStore>, dirty: &AtomicBool) -> Respons
             Response::Snapshot { sessions, generated_at_ms: super::now_ms() }
         }
     }
+}
+
+fn resolve_session_name(pane_id: &str) -> Option<String> {
+    let mut cmd = std::process::Command::new("tmux");
+    cmd.args(crate::paths::tmux_args())
+        .args(["display-message", "-p", "-t", pane_id, "#{session_name}"]);
+    let out = cmd.output().ok()?;
+    if !out.status.success() { return None; }
+    let name = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (!name.is_empty()).then_some(name)
 }

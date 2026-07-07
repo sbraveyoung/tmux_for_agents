@@ -3,12 +3,11 @@ mod commands;
 mod daemon;
 mod paths;
 
-#[allow(dead_code)] // AgentKind::label is consumed from Task 7 onward
+#[allow(dead_code)] // AgentKind::label has no production consumer yet
 mod event;
 
 mod protocol;
-
-#[allow(dead_code)] // some StateStore methods are consumed from Task 5+ onward
+mod render;
 mod state;
 
 use clap::{Parser, Subcommand};
@@ -45,7 +44,7 @@ fn main() {
             }
         }
         Command::Hook { agent, event } => commands::hook::run(&agent, &event),
-        Command::Status { .. } => println!("tfa:off"),
+        Command::Status { format } => commands::status::run(&format),
         Command::List => match client::request(&protocol::Request::Snapshot) {
             Ok(protocol::Response::Snapshot { sessions, .. }) => {
                 println!("{}", serde_json::to_string(&sessions).unwrap_or_default());

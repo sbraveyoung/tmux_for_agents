@@ -14,6 +14,10 @@ fn start_daemon(dir: &std::path::Path) -> (DaemonGuard, std::path::PathBuf) {
         .env("TFA_SOCKET", &sock)
         .env("TFA_STATE_DIR", dir)
         .env("TFA_SKIP_TMUX_CHECK", "1") // 测试环境无 tmux
+        // 指向必然不存在的 tmux server：Hook 分支的 session-name 解析会尝试
+        // 真的 shell 出 `tmux display-message`；不隔离会打到开发者本机真实的
+        // tmux server（pane id 如 %9 可能真存在）——不确定且有侵入性。
+        .env("TFA_TMUX_SOCKET", format!("tfa-test-none-{}", std::process::id()))
         .arg("daemon")
         .spawn()
         .unwrap();
