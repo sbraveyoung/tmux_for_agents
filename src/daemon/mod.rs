@@ -21,7 +21,7 @@ pub fn run() -> anyhow::Result<()> {
     };
     let sock_path = paths::socket_path();
     if let Some(parent) = sock_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        ensure_socket_dir(parent)?;
     }
     let _ = std::fs::remove_file(&sock_path); // 持锁后清理遗留 socket 是安全的
 
@@ -39,7 +39,8 @@ pub fn run() -> anyhow::Result<()> {
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(check_every.min(5000)));
                 since_check += check_every.min(5000);
-                store.lock().unwrap().prune(now_ms());
+                store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).prune(now_ms());
+                lifecycle::clean_activity_markers();
                 if dirty.swap(false, std::sync::atomic::Ordering::Relaxed) {
                     lifecycle::write_snapshot(&store);
                 }
@@ -67,4 +68,16 @@ fn load_or_default() -> StateStore {
         .ok()
         .and_then(|s| StateStore::from_json(&s).ok())
         .unwrap_or_default()
+}
+
+/// socket 父目录必须 0700 且属主是当前用户——多用户共享的 /tmp 或
+/// $XDG_RUNTIME_DIR 上，宽松权限会让别的本地用户读到/连上这条控制通道。
+fn ensure_socket_dir(dir: &std::path::Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    let meta = std::fs::metadata(dir)?;
+    let uid = unsafe { libc::getuid() };
+    anyhow::ensure!(meta.uid() == uid, "socket dir {} owned by uid {}, expected {}", dir.display(), meta.uid(), uid);
+    Ok(())
 }

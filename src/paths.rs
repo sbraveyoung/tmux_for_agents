@@ -5,10 +5,12 @@ fn env_path(key: &str) -> Option<PathBuf> {
 }
 
 pub fn socket_path() -> PathBuf {
-    env_path("TFA_SOCKET").unwrap_or_else(|| {
-        let uid = unsafe { libc::getuid() };
-        PathBuf::from(format!("/tmp/tfa-{uid}/tfa.sock"))
-    })
+    if let Some(p) = env_path("TFA_SOCKET") { return p; }
+    if let Some(runtime) = env_path("XDG_RUNTIME_DIR") {
+        return runtime.join("tfa/tfa.sock");
+    }
+    let uid = unsafe { libc::getuid() };
+    PathBuf::from(format!("/tmp/tfa-{uid}/tfa.sock"))
 }
 
 pub fn state_dir() -> PathBuf {
@@ -47,6 +49,10 @@ mod tests {
         // Single test function to prevent env-var race conditions across parallel test threads.
         // Rust's test runner uses parallel execution; std::env::set_var is process-global.
         // Each assertion sequence must set → assert → remove to avoid interference.
+        // XDG_RUNTIME_DIR may be inherited from a real ambient session (e.g. systemd on
+        // Linux CI) — clear it up front so Test 2's "/tmp default" assertion isn't at the
+        // mercy of the outer environment; Test 12 below re-establishes it deliberately.
+        std::env::remove_var("XDG_RUNTIME_DIR");
 
         // Test 1: TFA_SOCKET explicitly set
         std::env::set_var("TFA_SOCKET", "/x/y.sock");
@@ -99,5 +105,15 @@ mod tests {
         assert!(std::env::var("TFA_CLAUDE_PROJECTS_DIR").is_err());
         let projects = projects_dir();
         assert!(projects.to_string_lossy().ends_with(".claude/projects"));
+
+        // Test 12: XDG_RUNTIME_DIR 存在时优先于 /tmp 默认
+        std::env::remove_var("TFA_SOCKET");
+        std::env::set_var("XDG_RUNTIME_DIR", "/run/user/501");
+        assert_eq!(socket_path(), PathBuf::from("/run/user/501/tfa/tfa.sock"));
+        // TFA_SOCKET 仍然最高优先
+        std::env::set_var("TFA_SOCKET", "/x/y.sock");
+        assert_eq!(socket_path(), PathBuf::from("/x/y.sock"));
+        std::env::remove_var("TFA_SOCKET");
+        std::env::remove_var("XDG_RUNTIME_DIR");
     }
 }

@@ -136,6 +136,14 @@ mod tests {
     }
 
     #[test]
+    fn custom_agent_kind_wire_shape_is_pinned() {
+        // 对外 wire 契约（M2 定型）：custom agent 序列化为 {"custom":"<name>"}
+        let json = serde_json::to_string(&AgentKind::Custom("hermes".into())).unwrap();
+        assert_eq!(json, r#"{"custom":"hermes"}"#);
+        assert_eq!(serde_json::to_string(&AgentKind::Claude).unwrap(), r#""claude""#);
+    }
+
+    #[test]
     fn event_kind_mapping_table() {
         assert_eq!(EventKind::parse("session-start"), Some(EventKind::SessionStart));
         assert_eq!(EventKind::parse("user-prompt-submit"), Some(EventKind::UserPromptSubmit));

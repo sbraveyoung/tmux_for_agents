@@ -70,6 +70,10 @@ pub fn tick(
         return false;
     }
     let procs_list = procs::list_procs();
+    if ps_failed(panes.is_empty(), procs_list.is_empty()) {
+        // panes 非空但 procs 为空 = ps 失败（活系统不可能无进程）→ 跳过本轮防误杀
+        return false;
+    }
 
     let mut live: BTreeMap<String, Option<u32>> = BTreeMap::new();
     let mut agent_hits: Vec<(procs::PaneInfo, crate::event::AgentKind, u32)> = Vec::new();
@@ -171,4 +175,22 @@ pub fn tick(
         }
     }
     true
+}
+
+/// panes 非空但 procs 为空 = ps 失败（活系统不可能无进程）→ 跳过本轮防误杀
+fn ps_failed(panes_empty: bool, procs_empty: bool) -> bool {
+    !panes_empty && procs_empty
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ps_failure_guard_table() {
+        assert!(ps_failed(false, true));   // panes 在、procs 空 → ps 挂了
+        assert!(!ps_failed(false, false)); // 正常
+        assert!(!ps_failed(true, true));   // 无 pane：交给 tmux_alive 分支
+        assert!(!ps_failed(true, false));
+    }
 }

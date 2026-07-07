@@ -45,7 +45,7 @@ fn respond(line: &str, store: &Mutex<StateStore>, dirty: &AtomicBool) -> Respons
                 Some(ev) => {
                     let pane = ev.pane_id.clone();
                     let needs_name = {
-                        let mut st = store.lock().unwrap();
+                        let mut st = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         st.apply(ev);
                         st.sessions().iter()
                             .find(|s| s.pane_id == pane)
@@ -53,7 +53,7 @@ fn respond(line: &str, store: &Mutex<StateStore>, dirty: &AtomicBool) -> Respons
                     };
                     if needs_name {
                         if let Some(name) = resolve_session_name(&pane) {
-                            store.lock().unwrap().set_session_name(&pane, name);
+                            store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).set_session_name(&pane, name);
                         }
                     }
                     dirty.store(true, Ordering::Relaxed);
@@ -63,7 +63,7 @@ fn respond(line: &str, store: &Mutex<StateStore>, dirty: &AtomicBool) -> Respons
             }
         }
         Request::Snapshot => {
-            let sessions = store.lock().unwrap().sessions();
+            let sessions = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).sessions();
             Response::Snapshot { sessions, generated_at_ms: super::now_ms() }
         }
     }
