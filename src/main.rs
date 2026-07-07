@@ -1,6 +1,12 @@
 #[allow(dead_code)] // paths API is consumed from Task 4 onward
 mod paths;
 
+#[allow(dead_code)] // event module is consumed from Task 3+ onward
+mod event;
+
+#[allow(dead_code)] // protocol module is consumed from Task 3+ onward
+mod protocol;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
