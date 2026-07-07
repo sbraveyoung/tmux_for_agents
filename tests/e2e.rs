@@ -16,6 +16,18 @@ impl Drop for TmuxKillOnDrop {
     }
 }
 
+/// 兜底清理：Drop 时 kill + wait 直接持有的 daemon 子进程（镜像
+/// tests/scanner_e2e.rs::DaemonGuard）——与下面的 KillOnDrop 不同，这里测试
+/// 自己 spawn 了 daemon、握有 Child 句柄，可以直接收尸，不留僵尸进程。
+struct DaemonChildGuard(std::process::Child);
+
+impl Drop for DaemonChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 /// 兜底清理：Drop 时杀掉自动拉起的 daemon。daemon 由被测二进制间接拉起（拿不到
 /// Child 句柄），故用 lsof 按打开的 socket 文件定位持有者 PID。
 /// 注意：`pkill -f <sock>` 匹配不到 —— socket 路径只存在于子进程的环境变量
@@ -110,4 +122,55 @@ fn e2e_fake_agent_lifecycle_reflected_in_status() {
     // 显式清理（Drop guard 是兜底；这里正常路径下主动收尾更快）。
     drop(daemon_guard);
     drop(tmux_guard);
+}
+
+/// M1→M2 快照升级契约钉子：M1 时代写盘的 snapshot.json（没有 source/model/
+/// context/tokens 等 M2 新增字段）必须能被 M2 daemon 原样加载，并在 `tfa list`
+/// 中以 serde default 补齐后的形状对外服务——source 缺省补成 "hook"，model 等
+/// 富化字段保持 null，daemon 全程不 crash。不依赖 tmux（TFA_SKIP_TMUX_CHECK=1）
+/// 也不受 scanner 纠偏干扰（TFA_NO_SCAN=1）。
+#[test]
+fn daemon_loads_m1_era_snapshot_and_serves_enriched_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_tfa");
+    let sock_path = dir.path().join("tfa.sock");
+    let envs = [
+        ("TFA_SOCKET", sock_path.to_string_lossy().into_owned()),
+        ("TFA_STATE_DIR", dir.path().to_string_lossy().into_owned()),
+    ];
+
+    // 1. 预写 M1 形状的 snapshot.json——关键点：条目里没有任何 M2 新增字段。
+    let m1_snapshot = r#"{"sessions":{"%1":{"pane_id":"%1","agent":"claude","session_name":"api","state":"working","state_since_ms":100,"current_task":"fix","cwd":"/tmp/p","last_activity_ms":200}}}"#;
+    std::fs::write(dir.path().join("snapshot.json"), m1_snapshot).unwrap();
+
+    // 2. 直接起 daemon（不走 hook 自动拉起），并在 socket 就绪前登记清理守卫。
+    let mut cmd = Command::new(bin);
+    for (k, v) in &envs { cmd.env(k, v); }
+    cmd.env("TFA_SKIP_TMUX_CHECK", "1").env("TFA_NO_SCAN", "1").arg("daemon");
+    let mut daemon = DaemonChildGuard(cmd.spawn().expect("spawn daemon"));
+    for _ in 0..200 {
+        if sock_path.exists() { break; }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(sock_path.exists(), "daemon never created its socket");
+
+    // 3. tfa list：恰好一条 %1，source 被 default 补成 "hook"，model 保持 null。
+    let mut c = Command::new(bin);
+    for (k, v) in &envs { c.env(k, v); }
+    c.env("TFA_NO_SPAWN", "1").arg("list");
+    let out = c.output().expect("run tfa list");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let sessions: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("bad list json: {e}; got: {stdout}"));
+    let arr = sessions.as_array().expect("list output is a JSON array");
+    assert_eq!(arr.len(), 1, "expected exactly one session, got: {stdout}");
+    assert_eq!(arr[0]["pane_id"], "%1");
+    assert_eq!(arr[0]["source"], "hook", "M1 entry must default to source=hook: {stdout}");
+    assert!(arr[0]["model"].is_null(), "M1 entry has no model; must stay null: {stdout}");
+
+    // 4. daemon 没有 crash/panic：list 之后进程仍在运行。
+    assert!(
+        daemon.0.try_wait().expect("try_wait daemon").is_none(),
+        "daemon exited unexpectedly after serving the upgraded snapshot"
+    );
 }
