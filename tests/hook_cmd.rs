@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use serde_json::Value;
 use std::time::{Duration, Instant};
 
 /// 兜底清理：drop 时 kill 记录的 PID —— 即使后续断言 panic 也不会留下孤儿 daemon。
@@ -93,4 +94,80 @@ fn hook_autospawns_daemon_and_event_lands() {
     let out = status.assert().success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains(r#""pane_id":"%8""#), "got: {stdout}");
+}
+
+/// 兜底清理：drop 时 kill 直接持有的 daemon Child —— 断言 panic 也不会留下孤儿。
+struct ChildGuard(std::process::Child);
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn list_sessions(sock: &std::path::Path, state_dir: &std::path::Path) -> Vec<Value> {
+    let mut cmd = Command::cargo_bin("tfa").unwrap();
+    cmd.env("TFA_SOCKET", sock)
+        .env("TFA_STATE_DIR", state_dir)
+        .env("TFA_NO_SPAWN", "1")
+        .arg("list");
+    let out = cmd.assert().success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("bad list json: {e}; got: {stdout}"))
+}
+
+fn last_activity_ms(sessions: &[Value], pane: &str) -> u64 {
+    sessions.iter()
+        .find(|s| s["pane_id"] == pane)
+        .unwrap_or_else(|| panic!("pane {pane} missing from sessions: {sessions:?}"))
+        ["last_activity_ms"]
+        .as_u64()
+        .expect("last_activity_ms is a u64")
+}
+
+#[test]
+fn activity_hook_second_send_is_throttled() {
+    // spec §6: PostToolUse 仅用于活动心跳，客户端侧节流 —— 距上次上报 <2s 则跳过。
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("tfa.sock");
+
+    // 直接起 daemon（而非借 hook 自动拉起）：拿到真正的 Child 句柄，可确定性清理。
+    let daemon = std::process::Command::new(env!("CARGO_BIN_EXE_tfa"))
+        .env("TFA_SOCKET", &sock)
+        .env("TFA_STATE_DIR", dir.path())
+        .env("TFA_SKIP_TMUX_CHECK", "1")
+        .env("TFA_TMUX_SOCKET", format!("tfa-test-none-{}", std::process::id()))
+        .arg("daemon")
+        .spawn()
+        .unwrap();
+    let _guard = ChildGuard(daemon);
+    for _ in 0..100 {
+        if sock.exists() { break; }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // 全新 pane id，避免与本文件/其他测试用到的 pane 撞车。
+    let pane = "%9137";
+
+    let send_activity = || {
+        let mut cmd = Command::cargo_bin("tfa").unwrap();
+        cmd.env("TFA_SOCKET", &sock)
+            .env("TFA_STATE_DIR", dir.path())
+            .env("TFA_NO_SPAWN", "1")
+            .env("TMUX_PANE", pane)
+            .args(["hook", "claude", "post-tool-use"])
+            .write_stdin("{}");
+        cmd.assert().success();
+    };
+
+    send_activity();
+    let first = last_activity_ms(&list_sessions(&sock, dir.path()), pane);
+
+    send_activity(); // <2s later：应被客户端节流，daemon 侧完全收不到这次事件
+    let second = last_activity_ms(&list_sessions(&sock, dir.path()), pane);
+
+    assert_eq!(
+        first, second,
+        "second post-tool-use send should have been throttled; last_activity_ms advanced instead"
+    );
 }
