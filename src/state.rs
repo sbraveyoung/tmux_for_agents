@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const DEAD_RETENTION_MS: u64 = 300_000;
-#[allow(dead_code)] // part of M2 interface; used by scanner task
 pub const STALE_AFTER_MS: u64 = 300_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -32,7 +31,6 @@ pub struct TokenTotals {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-#[allow(dead_code)] // part of M2 interface; used by metrics/scanner tasks
 pub struct SessionMetrics {
     pub model: Option<String>,
     pub context: Option<ContextUsage>,
@@ -144,7 +142,10 @@ impl StateStore {
             }),
             EventKind::Stop => Some(SessionState::Done),
             EventKind::SessionEnd => Some(SessionState::Dead),
-            EventKind::Activity => None, // 只刷新 last_activity
+            // 只刷新 last_activity；但 Dead 条目收到任何 hook 流量都是存活证据，必须复活。
+            EventKind::Activity => {
+                if matches!(entry.state, SessionState::Dead) { Some(SessionState::Working) } else { None }
+            }
         };
         if let Some(state) = next {
             entry.state = state;
@@ -152,7 +153,6 @@ impl StateStore {
         }
     }
 
-    #[allow(dead_code)] // part of M2 interface; used by scanner task
     pub fn upsert_scanned(&mut self, pane_id: &str, agent: AgentKind, pid: u32, cwd: &str, session_name: &str, now_ms: u64) {
         // 漂移检查同 apply
         if let Some(existing) = self.sessions.get(pane_id) {
@@ -168,10 +168,19 @@ impl StateStore {
         if matches!(entry.source, Source::Hook) { entry.source = Source::Both; }
     }
 
-    #[allow(dead_code)] // part of M2 interface; used by scanner task
     pub fn reconcile_liveness(&mut self, live: &BTreeMap<String, Option<u32>>, now_ms: u64) {
         for s in self.sessions.values_mut() {
-            if matches!(s.state, SessionState::Dead) { continue; }
+            if matches!(s.state, SessionState::Dead) {
+                // 同 pane 同 kind 的 agent 不经 hook 重启：scan 看到活进程即复活，
+                // 否则要等 DEAD_RETENTION_MS(5min) 才会被 prune 重建，期间是 ghost-dead。
+                if let Some(Some(pid)) = live.get(&s.pane_id) {
+                    s.state = SessionState::Working;
+                    s.state_since_ms = now_ms;
+                    s.last_activity_ms = now_ms;
+                    s.pid = Some(*pid);
+                }
+                continue;
+            }
             match live.get(&s.pane_id) {
                 Some(Some(pid)) => { s.pid = Some(*pid); }
                 Some(None) | None => {
@@ -182,7 +191,6 @@ impl StateStore {
         }
     }
 
-    #[allow(dead_code)] // part of M2 interface; used by scanner task
     pub fn stale_sweep(&mut self, now_ms: u64) {
         for s in self.sessions.values_mut() {
             if matches!(s.state, SessionState::Working)
@@ -194,7 +202,6 @@ impl StateStore {
         }
     }
 
-    #[allow(dead_code)] // part of M2 interface; used by metrics/scanner tasks
     pub fn set_metrics(&mut self, pane_id: &str, m: SessionMetrics) {
         if let Some(s) = self.sessions.get_mut(pane_id) {
             if m.model.is_some() { s.model = m.model; }
@@ -204,14 +211,12 @@ impl StateStore {
         }
     }
 
-    #[allow(dead_code)] // part of M2 interface; used by later tasks
     pub fn set_transcript(&mut self, pane_id: &str, path: String) {
         if let Some(s) = self.sessions.get_mut(pane_id) {
             if s.transcript_path.is_none() { s.transcript_path = Some(path); }
         }
     }
 
-    #[allow(dead_code)] // part of M2 interface; used by scanner task
     pub fn panes_needing_name(&self) -> Vec<String> {
         self.sessions.values()
             .filter(|s| s.session_name.is_none())
@@ -308,6 +313,18 @@ mod tests {
         let sess = &s.sessions()[0];
         assert_eq!(sess.last_activity_ms, 200);
         assert!(matches!(sess.state, SessionState::WaitingInput { .. }));
+    }
+
+    #[test]
+    fn activity_event_revives_dead_entry() {
+        // 任何 hook 流量都是存活证据：一个被短暂 ps 失败误判 Dead 的 working claude
+        // 不该等到下一个非 activity 事件才复活。
+        let mut st = StateStore::new();
+        st.apply(ev(EventKind::SessionEnd, 1000));
+        st.apply(ev(EventKind::Activity, 2000));
+        let s = &st.sessions()[0];
+        assert!(matches!(s.state, SessionState::Working));
+        assert_eq!(s.state_since_ms, 2000);
     }
 
     #[test]
@@ -458,16 +475,32 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_liveness_leaves_live_and_dead_alone() {
+    fn reconcile_liveness_leaves_dead_alone_without_live_process() {
+        // Dead + 无存活进程（Some(None) 或 pane 缺席）：保持 Dead，state_since 不重置
+        // （否则 prune 永不触发）。区别于下面 revive 用例：那个用例是 Dead + Some(pid)。
         let mut st = StateStore::new();
         st.apply(ev(EventKind::SessionEnd, 1000)); // 已 Dead
         let mut live = std::collections::BTreeMap::new();
-        live.insert("%1".to_string(), Some(9u32));
+        live.insert("%1".to_string(), None::<u32>);
         st.reconcile_liveness(&live, 5000);
-        // 已 Dead 的不被复活也不重置 state_since（否则 prune 永不触发）
         let s = &st.sessions()[0];
         assert!(matches!(s.state, SessionState::Dead));
         assert_eq!(s.state_since_ms, 1000);
+    }
+
+    #[test]
+    fn reconcile_liveness_revives_dead_with_live_process() {
+        // 同 kind agent 在同一 pane 里不经 hook 重启：scan 看到活进程必须复活该条目，
+        // 否则 ghost-dead 状态要等 5min DEAD_RETENTION_MS 才会被 prune 重建。
+        let mut st = StateStore::new();
+        st.apply(ev(EventKind::SessionEnd, 1000)); // %1 Dead
+        let mut live = std::collections::BTreeMap::new();
+        live.insert("%1".to_string(), Some(77u32));
+        st.reconcile_liveness(&live, 5000);
+        let s = &st.sessions()[0];
+        assert!(matches!(s.state, SessionState::Working), "live process must revive Dead entry");
+        assert_eq!(s.state_since_ms, 5000);
+        assert_eq!(s.pid, Some(77));
     }
 
     #[test]
