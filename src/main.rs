@@ -1,3 +1,4 @@
+#[allow(dead_code)] // paths API is consumed from Task 4 onward
 mod paths;
 
 use clap::{Parser, Subcommand};
