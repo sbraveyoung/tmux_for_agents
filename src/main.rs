@@ -7,6 +7,9 @@ mod event;
 #[allow(dead_code)] // protocol module is consumed from Task 3+ onward
 mod protocol;
 
+#[allow(dead_code)] // state module is consumed from Task 4 onward
+mod state;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]

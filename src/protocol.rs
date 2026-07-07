@@ -19,7 +19,7 @@ pub enum Request {
 pub enum Response {
     Ok,
     Snapshot {
-        sessions: Vec<serde_json::Value>,
+        sessions: Vec<crate::state::AgentSession>,
         generated_at_ms: u64,
     },
     Error { message: String },
@@ -36,5 +36,20 @@ mod tests {
         assert!(matches!(req, Request::Hook { .. }));
         let back = serde_json::to_string(&req).unwrap();
         assert!(back.contains(r#""op":"hook""#));
+    }
+
+    #[test]
+    fn snapshot_wire_shape() {
+        let snapshot = Response::Snapshot {
+            sessions: vec![],
+            generated_at_ms: 42,
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(json.contains(r#""result":"snapshot""#));
+        assert!(json.contains(r#""generated_at_ms":42"#));
+
+        let error = Response::Error { message: "x".into() };
+        let json = serde_json::to_string(&error).unwrap();
+        assert!(json.contains(r#""result":"error""#));
     }
 }
