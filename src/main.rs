@@ -1,6 +1,6 @@
+mod client;
+mod commands;
 mod daemon;
-
-#[allow(dead_code)] // some paths helpers are consumed from Task 5+ onward
 mod paths;
 
 #[allow(dead_code)] // AgentKind::label is consumed from Task 7 onward
@@ -44,8 +44,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Command::Hook { .. } => std::process::exit(0), // hook 纪律：未实现也静默
+        Command::Hook { agent, event } => commands::hook::run(&agent, &event),
         Command::Status { .. } => println!("tfa:off"),
-        Command::List => println!("[]"),
+        Command::List => match client::request(&protocol::Request::Snapshot) {
+            Ok(protocol::Response::Snapshot { sessions, .. }) => {
+                println!("{}", serde_json::to_string(&sessions).unwrap_or_default());
+            }
+            _ => println!("[]"),
+        },
     }
 }
