@@ -1,13 +1,14 @@
-#[allow(dead_code)] // paths API is consumed from Task 4 onward
+mod daemon;
+
+#[allow(dead_code)] // some paths helpers are consumed from Task 5+ onward
 mod paths;
 
-#[allow(dead_code)] // event module is consumed from Task 3+ onward
+#[allow(dead_code)] // AgentKind::label is consumed from Task 7 onward
 mod event;
 
-#[allow(dead_code)] // protocol module is consumed from Task 3+ onward
 mod protocol;
 
-#[allow(dead_code)] // state module is consumed from Task 4 onward
+#[allow(dead_code)] // some StateStore methods are consumed from Task 5+ onward
 mod state;
 
 use clap::{Parser, Subcommand};
@@ -37,7 +38,12 @@ enum Command {
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Command::Daemon => todo!("task 5"),
+        Command::Daemon => {
+            if let Err(e) = daemon::run() {
+                eprintln!("tfa daemon: {e}");
+                std::process::exit(1);
+            }
+        }
         Command::Hook { .. } => std::process::exit(0), // hook 纪律：未实现也静默
         Command::Status { .. } => println!("tfa:off"),
         Command::List => println!("[]"),
