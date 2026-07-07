@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hook.sh\" claude session-start" }] }],
+    "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hook.sh\" claude session-end" }] }],
+    "UserPromptSubmit": [{ "matcher": "", "hooks": [{ "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hook.sh\" claude user-prompt-submit" }] }],
+    "Notification": [{ "matcher": "", "hooks": [{ "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hook.sh\" claude notification" }] }],
+    "Stop": [{ "matcher": "", "hooks": [{ "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hook.sh\" claude stop" }] }],
+    "PostToolUse": [{ "matcher": "", "hooks": [{ "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hook.sh\" claude post-tool-use" }] }]
+  }
+}

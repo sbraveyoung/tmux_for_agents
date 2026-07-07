@@ -1,0 +1,6 @@
+{
+  "name": "tfa",
+  "description": "tmux for agents — report Claude Code lifecycle events to the tfa daemon",
+  "version": "0.1.0",
+  "author": { "name": "sbraveyoung" }
+}
