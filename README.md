@@ -27,7 +27,9 @@ after their next prompt, or restart them with `claude -c`.
   GUI-spawned Claude Code process sees (a common source of "hooks
   silently do nothing").
 - `TFA_SOCKET` — override the daemon's Unix socket path (default
-  `/tmp/tfa-<uid>/tfa.sock`).
+  `/tmp/tfa-<uid>/tfa.sock`, but `$XDG_RUNTIME_DIR/tfa/tfa.sock` is used
+  instead when `XDG_RUNTIME_DIR` is set — e.g. under systemd user
+  sessions on Linux).
 - `TFA_STATE_DIR` — override the daemon's state directory, where the
   snapshot, lock file, and activity-throttle markers live (default
   `~/.local/state/tfa`).

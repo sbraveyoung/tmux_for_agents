@@ -250,7 +250,7 @@ fn scanner_backfills_preexisting_agent_and_marks_dead() {
 /// 同时 hook 报了一个 tmux 里根本不存在的 pane_id——reconcile_liveness 应把
 /// 它判 Dead（pane 不在本轮活跃表里 = 已消失）。
 #[test]
-fn hook_entry_gets_confirmed_to_both_and_stale_working_flagged() {
+fn hook_entry_gets_confirmed_to_both_and_ghost_pane_marked_dead() {
     if skip_if_no_tmux() {
         return;
     }

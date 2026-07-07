@@ -173,6 +173,16 @@ impl StateStore {
             if matches!(s.state, SessionState::Dead) {
                 // 同 pane 同 kind 的 agent 不经 hook 重启：scan 看到活进程即复活，
                 // 否则要等 DEAD_RETENTION_MS(5min) 才会被 prune 重建，期间是 ghost-dead。
+                //
+                // Narrow race, intentional: a genuine SessionEnd hook can mark
+                // this Dead in the same window a scan tick observes the old
+                // pid still alive (process hasn't exited yet from the OS's
+                // point of view) — this revive branch flips it back to
+                // Working for at most one scan cycle before the next tick (or
+                // the process actually exiting) corrects it again. Accepted:
+                // self-heals within one cycle, and the alternative (delaying
+                // revive) reintroduces the ghost-dead window this branch
+                // exists to close.
                 if let Some(Some(pid)) = live.get(&s.pane_id) {
                     s.state = SessionState::Working;
                     s.state_since_ms = now_ms;
@@ -202,12 +212,29 @@ impl StateStore {
         }
     }
 
-    pub fn set_metrics(&mut self, pane_id: &str, m: SessionMetrics) {
+    /// Updates whichever `Some` fields differ from what's stored. A scan-only
+    /// session (e.g. codex — its hooks aren't wired to tfa) never gets an
+    /// `Activity` hook, so without this it goes permanently Stale after
+    /// STALE_AFTER_MS even while genuinely working: metrics keep updating
+    /// but the state freezes (spec principle: 文件赢事实 — changed transcript/db
+    /// facts are proof of life). So: any field that actually *changes* bumps
+    /// `last_activity_ms` and un-Stales the session; re-reading identical
+    /// metrics (e.g. codex polling an idle thread) must NOT count as
+    /// activity, or an idle scan-only session would never go Stale at all.
+    pub fn set_metrics(&mut self, pane_id: &str, m: SessionMetrics, now_ms: u64) {
         if let Some(s) = self.sessions.get_mut(pane_id) {
-            if m.model.is_some() { s.model = m.model; }
-            if m.context.is_some() { s.context = m.context; }
-            if m.tokens.is_some() { s.tokens = m.tokens; }
-            if m.git_branch.is_some() { s.git_branch = m.git_branch; }
+            let mut changed = false;
+            if m.model.is_some() && m.model != s.model { s.model = m.model; changed = true; }
+            if m.context.is_some() && m.context != s.context { s.context = m.context; changed = true; }
+            if m.tokens.is_some() && m.tokens != s.tokens { s.tokens = m.tokens; changed = true; }
+            if m.git_branch.is_some() && m.git_branch != s.git_branch { s.git_branch = m.git_branch; changed = true; }
+            if changed {
+                s.last_activity_ms = now_ms;
+                if matches!(s.state, SessionState::Stale) {
+                    s.state = SessionState::Working;
+                    s.state_since_ms = now_ms;
+                }
+            }
         }
     }
 
@@ -396,7 +423,7 @@ mod tests {
         };
         let mut st = StateStore::new();
         st.upsert_scanned("%9", AgentKind::Claude, 4242, "/tmp/p", "api", 1000);
-        st.set_metrics("%9", m);
+        st.set_metrics("%9", m, 1000);
         let json = serde_json::to_string(&st.sessions()[0]).unwrap();
         assert!(json.contains(r#""source":"scan""#), "json: {json}");
         assert!(json.contains(r#""used_tokens":982869"#));
@@ -453,7 +480,7 @@ mod tests {
         st.apply(e);
         st.set_metrics("%1", SessionMetrics {
             model: Some("claude-fable-5".into()), context: None, tokens: None, git_branch: None,
-        });
+        }, 1000);
         st.apply(ev(EventKind::SessionStart, 2000));
         let s = &st.sessions()[0];
         assert!(matches!(s.state, SessionState::Starting));
@@ -524,6 +551,43 @@ mod tests {
         let s = &st.sessions()[0];
         assert_eq!(s.transcript_path.as_deref(), Some("/tmp/t.jsonl"));
         assert_eq!(s.agent_session_id.as_deref(), Some("abc-123"));
+    }
+
+    #[test]
+    fn changed_metrics_bump_activity_and_unstale() {
+        // 纯扫描会话（如 codex：hook 没接进 tfa）只靠 metrics 变化证明存活 ——
+        // “文件赢事实”：transcript/db 里指标真的变了，就是活的证据，必须把
+        // Stale 打回 Working，否则它 300s 后永久卡死在 Stale（F2）。
+        let mut st = StateStore::new();
+        st.upsert_scanned("%1", AgentKind::Codex, 7, "/p", "s", 1000);
+        st.stale_sweep(1000 + STALE_AFTER_MS + 1); // Stale
+        st.set_metrics("%1", SessionMetrics {
+            model: Some("gpt-5.3-codex".into()),
+            tokens: Some(TokenTotals { total: 500, ..Default::default() }),
+            context: None,
+            git_branch: None,
+        }, 400_000);
+        let s = &st.sessions()[0];
+        assert!(matches!(s.state, SessionState::Working), "changing metrics must un-Stale");
+        assert_eq!(s.last_activity_ms, 400_000);
+    }
+
+    #[test]
+    fn identical_metrics_do_not_bump_activity() {
+        let mut st = StateStore::new();
+        st.upsert_scanned("%1", AgentKind::Codex, 7, "/p", "s", 1000);
+        let m = SessionMetrics {
+            model: Some("gpt-5.3-codex".into()),
+            tokens: Some(TokenTotals { total: 500, ..Default::default() }),
+            context: None,
+            git_branch: None,
+        };
+        st.set_metrics("%1", m.clone(), 2000);
+        let after_first = st.sessions()[0].last_activity_ms;
+        st.set_metrics("%1", m, 9000);
+        assert_eq!(st.sessions()[0].last_activity_ms, after_first, "unchanged metrics must not count as activity");
+        st.stale_sweep(after_first + STALE_AFTER_MS + 1);
+        assert!(matches!(st.sessions()[0].state, SessionState::Stale), "idle scan-only session must still go Stale");
     }
 
     #[test]

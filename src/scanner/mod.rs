@@ -157,11 +157,19 @@ pub fn tick(
         };
         cursor_paths.insert(pane_id.clone(), path.clone());
         let cursor = cursors.entry(pane_id.clone()).or_default();
+        // trust domain note: `path` is a transcript_path that ultimately came
+        // from a hook payload (or discover_transcript's own directory walk).
+        // Any process that can write to the daemon's socket already has to
+        // be the same uid as the daemon (0700 socket dir) to connect at all,
+        // so treating the payload's path as trusted here doesn't widen the
+        // attack surface. Reads are bounded regardless: read_update caps the
+        // first read at TAIL_CAP and is incremental after, so a pathological
+        // (huge/binary/malformed) file yields None rather than unbounded work.
         if let Some(m) = claude_jsonl::read_update(&path, cursor) {
             store
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .set_metrics(&pane_id, m);
+                .set_metrics(&pane_id, m, now_ms);
         }
     }
     // —— codex 指标 ——
@@ -180,7 +188,7 @@ pub fn tick(
             for (pane_id, cwd) in codex_targets {
                 let Some(cwd) = cwd.as_deref() else { continue };
                 if let Some(m) = crate::sources::codex_db::metrics_for(&threads, cwd) {
-                    st.set_metrics(&pane_id, m);
+                    st.set_metrics(&pane_id, m, now_ms);
                 }
             }
         }
