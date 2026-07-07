@@ -181,6 +181,27 @@ mod tests {
     }
 
     #[test]
+    fn first_read_of_large_file_skips_to_tail_cap() {
+        // 文件 > TAIL_CAP：首读只看尾部窗口，丢弃首个不完整行，仍能解出最后一条 assistant
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        let filler = format!("{{\"type\":\"filler\",\"pad\":\"{}\"}}", "x".repeat(1024));
+        while f.as_file().metadata().unwrap().len() <= TAIL_CAP {
+            writeln!(f, "{filler}").unwrap();
+        }
+        writeln!(f, "{REAL_ASSISTANT}").unwrap();
+        f.flush().unwrap();
+        let mut cur = TranscriptCursor::default();
+        let m = read_update(f.path(), &mut cur).unwrap();
+        assert_eq!(m.model.as_deref(), Some("claude-fable-5"));
+        let len = f.as_file().metadata().unwrap().len();
+        assert_eq!(cur.offset, len, "offset should reach EOF after first tail read");
+        // 增量续读依旧正常
+        writeln!(f, "{REAL_ASSISTANT}").unwrap();
+        f.flush().unwrap();
+        assert!(read_update(f.path(), &mut cur).is_some());
+    }
+
+    #[test]
     fn discover_transcript_picks_newest_jsonl() {
         let dir = tempfile::tempdir().unwrap();
         let proj = dir.path().join(encode_cwd("/tmp/proj"));
