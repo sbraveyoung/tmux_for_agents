@@ -2,6 +2,7 @@ use crate::paths;
 use crate::protocol::{Request, Response};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::time::Duration;
 
 const IO_TIMEOUT: Duration = Duration::from_millis(100);
@@ -13,14 +14,24 @@ fn connect() -> std::io::Result<UnixStream> {
     Ok(stream)
 }
 
+#[allow(clippy::zombie_processes)] // intentional detach: daemon outlives this short-lived client, never wait()ed
 fn spawn_daemon() {
     let Ok(exe) = std::env::current_exe() else { return };
-    let _ = std::process::Command::new(exe)
-        .arg("daemon")
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("daemon")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+        .stderr(std::process::Stdio::null());
+    // Detach from the birth pane's session so closing the pane that triggered
+    // the autospawn doesn't SIGHUP the resident daemon: without this, the
+    // daemon inherits the hook's process group and controlling TTY.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let _ = cmd.spawn();
 }
 
 pub fn request(req: &Request) -> anyhow::Result<Response> {
