@@ -105,6 +105,7 @@ impl Drop for ChildGuard {
     }
 }
 
+/// 返回 `tfa list` 的 `sessions` 数组（M3 起 wire 形状是 `{sessions, quota}` 对象）。
 fn list_sessions(sock: &std::path::Path, state_dir: &std::path::Path) -> Vec<Value> {
     let mut cmd = Command::cargo_bin("tfa").unwrap();
     cmd.env("TFA_SOCKET", sock)
@@ -113,7 +114,8 @@ fn list_sessions(sock: &std::path::Path, state_dir: &std::path::Path) -> Vec<Val
         .arg("list");
     let out = cmd.assert().success();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
-    serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("bad list json: {e}; got: {stdout}"))
+    let v: Value = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("bad list json: {e}; got: {stdout}"));
+    v["sessions"].as_array().cloned().unwrap_or_default()
 }
 
 fn last_activity_ms(sessions: &[Value], pane: &str) -> u64 {

@@ -1,3 +1,4 @@
+use serde_json::Value;
 use std::process::Command;
 use std::time::Duration;
 
@@ -162,7 +163,7 @@ fn daemon_loads_m1_era_snapshot_and_serves_enriched_shape() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let sessions: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("bad list json: {e}; got: {stdout}"));
-    let arr = sessions.as_array().expect("list output is a JSON array");
+    let arr = sessions["sessions"].as_array().expect("list output has a sessions array");
     assert_eq!(arr.len(), 1, "expected exactly one session, got: {stdout}");
     assert_eq!(arr[0]["pane_id"], "%1");
     assert_eq!(arr[0]["source"], "hook", "M1 entry must default to source=hook: {stdout}");
@@ -172,5 +173,45 @@ fn daemon_loads_m1_era_snapshot_and_serves_enriched_shape() {
     assert!(
         daemon.0.try_wait().expect("try_wait daemon").is_none(),
         "daemon exited unexpectedly after serving the upgraded snapshot"
+    );
+}
+
+/// M3 wire 契约钉子：`tfa list` 输出必须是含 `sessions` + `quota` 两个键的 JSON 对象
+/// （而非 M1/M2 时代的裸 session 数组）。TFA_NO_SCAN=1 下 quota 允许是空数组——这里
+/// 只验证 wire 形状不炸，不断言具体 quota 内容（那是 src/quota/mod.rs 单测的职责）。
+#[test]
+fn list_json_includes_quota_field_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_tfa");
+    let sock_path = dir.path().join("tfa.sock");
+    let envs = [
+        ("TFA_SOCKET", sock_path.to_string_lossy().into_owned()),
+        ("TFA_STATE_DIR", dir.path().to_string_lossy().into_owned()),
+    ];
+
+    let mut cmd = Command::new(bin);
+    for (k, v) in &envs { cmd.env(k, v); }
+    cmd.env("TFA_SKIP_TMUX_CHECK", "1").env("TFA_NO_SCAN", "1").arg("daemon");
+    let mut daemon = DaemonChildGuard(cmd.spawn().expect("spawn daemon"));
+    for _ in 0..200 {
+        if sock_path.exists() { break; }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(sock_path.exists(), "daemon never created its socket");
+
+    let mut c = Command::new(bin);
+    for (k, v) in &envs { c.env(k, v); }
+    c.env("TFA_NO_SPAWN", "1").arg("list");
+    let out = c.output().expect("run tfa list");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("bad list json: {e}; got: {stdout}"));
+    assert!(v.is_object(), "list output must be a JSON object: {stdout}");
+    assert!(v.get("sessions").is_some_and(Value::is_array), "missing sessions array: {stdout}");
+    assert!(v.get("quota").is_some_and(Value::is_array), "missing quota array: {stdout}");
+
+    assert!(
+        daemon.0.try_wait().expect("try_wait daemon").is_none(),
+        "daemon exited unexpectedly after serving list"
     );
 }

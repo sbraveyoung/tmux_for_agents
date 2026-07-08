@@ -27,6 +27,7 @@ pub fn run() -> anyhow::Result<()> {
 
     let store = Arc::new(Mutex::new(load_or_default()));
     let dirty = Arc::new(AtomicBool::new(false));
+    let quota = Arc::new(Mutex::new(crate::quota::QuotaCache::new()));
 
     // 后台维护线程：快照 + prune（5s）、tmux 存活（可配置，默认 10s）
     {
@@ -56,10 +57,10 @@ pub fn run() -> anyhow::Result<()> {
         });
     }
 
-    crate::scanner::spawn(Arc::clone(&store), Arc::clone(&dirty));
+    crate::scanner::spawn(Arc::clone(&store), Arc::clone(&dirty), Arc::clone(&quota));
 
     let listener = UnixListener::bind(&sock_path)?;
-    server::serve(listener, store, dirty); // 阻塞 accept 循环
+    server::serve(listener, store, dirty, quota); // 阻塞 accept 循环
     Ok(())
 }
 

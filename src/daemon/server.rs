@@ -1,21 +1,23 @@
 use crate::event::AgentEvent;
 use crate::protocol::{Request, Response};
+use crate::quota::QuotaCache;
 use crate::state::StateStore;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub fn serve(listener: UnixListener, store: Arc<Mutex<StateStore>>, dirty: Arc<AtomicBool>) {
+pub fn serve(listener: UnixListener, store: Arc<Mutex<StateStore>>, dirty: Arc<AtomicBool>, quota: Arc<Mutex<QuotaCache>>) {
     for conn in listener.incoming() {
         let Ok(stream) = conn else { continue };
         let store = Arc::clone(&store);
         let dirty = Arc::clone(&dirty);
-        std::thread::spawn(move || handle(stream, store, dirty));
+        let quota = Arc::clone(&quota);
+        std::thread::spawn(move || handle(stream, store, dirty, quota));
     }
 }
 
-fn handle(stream: UnixStream, store: Arc<Mutex<StateStore>>, dirty: Arc<AtomicBool>) {
+fn handle(stream: UnixStream, store: Arc<Mutex<StateStore>>, dirty: Arc<AtomicBool>, quota: Arc<Mutex<QuotaCache>>) {
     let mut writer = match stream.try_clone() {
         Ok(w) => w,
         Err(_) => return,
@@ -24,14 +26,14 @@ fn handle(stream: UnixStream, store: Arc<Mutex<StateStore>>, dirty: Arc<AtomicBo
     for line in reader.lines() {
         let Ok(line) = line else { return };
         if line.trim().is_empty() { continue; }
-        let resp = respond(&line, &store, &dirty);
+        let resp = respond(&line, &store, &dirty, &quota);
         let mut out = serde_json::to_string(&resp).unwrap_or_default();
         out.push('\n');
         if writer.write_all(out.as_bytes()).is_err() { return; }
     }
 }
 
-fn respond(line: &str, store: &Mutex<StateStore>, dirty: &AtomicBool) -> Response {
+fn respond(line: &str, store: &Mutex<StateStore>, dirty: &AtomicBool, quota: &Mutex<QuotaCache>) -> Response {
     let req: Request = match serde_json::from_str(line) {
         Ok(r) => r,
         Err(e) => return Response::Error { message: format!("bad request: {e}") },
@@ -64,7 +66,8 @@ fn respond(line: &str, store: &Mutex<StateStore>, dirty: &AtomicBool) -> Respons
         }
         Request::Snapshot => {
             let sessions = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).sessions();
-            Response::Snapshot { sessions, generated_at_ms: super::now_ms() }
+            let quota = quota.lock().unwrap_or_else(std::sync::PoisonError::into_inner).states();
+            Response::Snapshot { sessions, quota, generated_at_ms: super::now_ms() }
         }
     }
 }

@@ -7,6 +7,8 @@
 
 pub mod procs;
 
+use crate::quota::burn::BurnSampler;
+use crate::quota::QuotaCache;
 use crate::sources::claude_jsonl::{self, TranscriptCursor};
 use crate::state::StateStore;
 use std::collections::{BTreeMap, HashMap};
@@ -24,16 +26,17 @@ fn scan_interval_ms() -> u64 {
 /// Starts the background scanner thread. A no-op when `TFA_NO_SCAN=1` —
 /// existing daemon tests written against M1-only behavior opt out this way
 /// rather than tolerate scanner side effects they don't expect.
-pub fn spawn(store: Arc<Mutex<StateStore>>, dirty: Arc<AtomicBool>) {
+pub fn spawn(store: Arc<Mutex<StateStore>>, dirty: Arc<AtomicBool>, quota: Arc<Mutex<QuotaCache>>) {
     if std::env::var("TFA_NO_SCAN").as_deref() == Ok("1") {
         return;
     }
     std::thread::spawn(move || {
         let mut cursors: HashMap<String, TranscriptCursor> = HashMap::new();
         let mut cursor_paths: HashMap<String, PathBuf> = HashMap::new();
+        let mut burn = BurnSampler::new(crate::config::Config::load().quota.burn_rate_window_mins);
         loop {
             std::thread::sleep(std::time::Duration::from_millis(scan_interval_ms()));
-            if tick(&store, &mut cursors, &mut cursor_paths, crate::daemon::now_ms()) {
+            if tick(&store, &mut cursors, &mut cursor_paths, crate::daemon::now_ms(), &mut burn, &quota) {
                 dirty.store(true, Ordering::Relaxed);
             }
         }
@@ -61,6 +64,8 @@ pub fn tick(
     cursors: &mut HashMap<String, TranscriptCursor>,
     cursor_paths: &mut HashMap<String, PathBuf>,
     now_ms: u64,
+    burn: &mut BurnSampler,
+    quota: &Mutex<QuotaCache>,
 ) -> bool {
     // list_panes→lock TOCTOU: a pane can get hooked between this snapshot and
     // the state-store lock below, so a brand-new hook-reported session can be
@@ -198,6 +203,15 @@ pub fn tick(
             }
         }
     }
+
+    // —— burn 采样 + quota 刷新 ——
+    let samples: Vec<(String, crate::event::AgentKind, u64)> = {
+        let st = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        st.sessions().iter().map(|s| (s.stable_key(), s.agent.clone(), s.consumed_tokens)).collect()
+    };
+    burn.sample(&samples, now_ms);
+    quota.lock().unwrap_or_else(std::sync::PoisonError::into_inner).refresh(burn, now_ms);
+
     true
 }
 

@@ -20,6 +20,8 @@ pub enum Response {
     Ok,
     Snapshot {
         sessions: Vec<crate::state::AgentSession>,
+        #[serde(default)]
+        quota: Vec<crate::quota::QuotaState>,
         generated_at_ms: u64,
     },
     Error { message: String },
@@ -42,6 +44,7 @@ mod tests {
     fn snapshot_wire_shape() {
         let snapshot = Response::Snapshot {
             sessions: vec![],
+            quota: vec![],
             generated_at_ms: 42,
         };
         let json = serde_json::to_string(&snapshot).unwrap();

@@ -16,7 +16,6 @@ mod sources;
 
 mod scanner;
 
-#[allow(dead_code)] // consumed by daemon/scanner from Task 4
 mod quota;
 
 use clap::{Parser, Subcommand};
@@ -55,10 +54,11 @@ fn main() {
         Command::Hook { agent, event } => commands::hook::run(&agent, &event),
         Command::Status { format } => commands::status::run(&format),
         Command::List => match client::request(&protocol::Request::Snapshot) {
-            Ok(protocol::Response::Snapshot { sessions, .. }) => {
-                println!("{}", serde_json::to_string(&sessions).unwrap_or_default());
+            Ok(protocol::Response::Snapshot { sessions, quota, .. }) => {
+                let out = serde_json::json!({ "sessions": sessions, "quota": quota });
+                println!("{}", serde_json::to_string(&out).unwrap_or_default());
             }
-            _ => println!("[]"),
+            _ => println!("{{\"sessions\":[],\"quota\":[]}}"),
         },
     }
 }

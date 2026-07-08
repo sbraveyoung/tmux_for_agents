@@ -110,6 +110,8 @@ impl TestEnv {
         assert!(status.success(), "tfa hook exited non-zero");
     }
 
+    /// 返回 `tfa list` 的 `sessions` 数组（M3 起 wire 形状是 `{sessions, quota}` 对象；
+    /// 这里解一层，让调用方继续像 M1/M2 时代一样对着裸数组用 `.as_array()`）。
     fn list(&self) -> serde_json::Value {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_tfa"));
         for (k, v) in self.base_envs() {
@@ -118,7 +120,9 @@ impl TestEnv {
         cmd.env("TFA_NO_SPAWN", "1").arg("list");
         let out = cmd.output().expect("list command failed to run");
         let stdout = String::from_utf8_lossy(&out.stdout);
-        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("bad list json: {e}; got: {stdout}"))
+        let v: serde_json::Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|e| panic!("bad list json: {e}; got: {stdout}"));
+        v["sessions"].clone()
     }
 }
 
