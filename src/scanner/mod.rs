@@ -165,11 +165,12 @@ pub fn tick(
         // attack surface. Reads are bounded regardless: read_update caps the
         // first read at TAIL_CAP and is incremental after, so a pathological
         // (huge/binary/malformed) file yields None rather than unbounded work.
-        if let Some(m) = claude_jsonl::read_update(&path, cursor) {
-            store
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .set_metrics(&pane_id, m, now_ms);
+        let m = claude_jsonl::read_update(&path, cursor);
+        let consumed_now = cursor.consumed;
+        {
+            let mut st = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            st.set_consumed(&pane_id, consumed_now);
+            if let Some(m) = m { st.set_metrics(&pane_id, m, now_ms); }
         }
     }
     // —— codex 指标 ——
@@ -188,6 +189,10 @@ pub fn tick(
             for (pane_id, cwd) in codex_targets {
                 let Some(cwd) = cwd.as_deref() else { continue };
                 if let Some(m) = crate::sources::codex_db::metrics_for(&threads, cwd) {
+                    // codex tokens_used 即 consumed 口径（per-thread 累计）
+                    if let Some(t) = threads.iter().filter(|t| t.cwd == cwd).max_by_key(|t| t.updated_at_ms) {
+                        st.set_consumed(&pane_id, t.tokens_used);
+                    }
                     st.set_metrics(&pane_id, m, now_ms);
                 }
             }

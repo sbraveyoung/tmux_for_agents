@@ -66,6 +66,7 @@ mod tests {
             git_branch: None,
             transcript_path: None,
             agent_session_id: None,
+            consumed_tokens: 0,
         }
     }
 

@@ -76,6 +76,15 @@ pub struct AgentSession {
     pub transcript_path: Option<String>,
     #[serde(default)]
     pub agent_session_id: Option<String>,
+    #[serde(default)]
+    pub consumed_tokens: u64,
+}
+
+impl AgentSession {
+    #[allow(dead_code)] // no production consumer yet; Task 3 burn sampler keys by this
+    pub fn stable_key(&self) -> String {
+        self.agent_session_id.clone().unwrap_or_else(|| self.pane_id.clone())
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -101,6 +110,7 @@ fn fresh_session(pane_id: &str, agent: AgentKind, source: Source, at_ms: u64) ->
         git_branch: None,
         transcript_path: None,
         agent_session_id: None,
+        consumed_tokens: 0,
     }
 }
 
@@ -235,6 +245,13 @@ impl StateStore {
                     s.state_since_ms = now_ms;
                 }
             }
+        }
+    }
+
+    /// 单调守卫：只在 consumed 增长时更新（会话内单调；新会话由 fresh_session 归零）。
+    pub fn set_consumed(&mut self, pane_id: &str, consumed: u64) {
+        if let Some(s) = self.sessions.get_mut(pane_id) {
+            if consumed > s.consumed_tokens { s.consumed_tokens = consumed; }
         }
     }
 
@@ -396,6 +413,7 @@ mod tests {
             git_branch: None,
             transcript_path: None,
             agent_session_id: None,
+            consumed_tokens: 0,
         };
         let json = serde_json::to_string(&sess).unwrap();
         assert!(json.contains(r#""state":"waiting_input""#), "json was: {json}");
@@ -588,6 +606,40 @@ mod tests {
         assert_eq!(st.sessions()[0].last_activity_ms, after_first, "unchanged metrics must not count as activity");
         st.stale_sweep(after_first + STALE_AFTER_MS + 1);
         assert!(matches!(st.sessions()[0].state, SessionState::Stale), "idle scan-only session must still go Stale");
+    }
+
+    #[test]
+    fn consumed_tokens_defaults_zero_and_set_is_monotonic() {
+        let mut st = StateStore::new();
+        st.apply(ev(EventKind::SessionStart, 0));
+        assert_eq!(st.sessions()[0].consumed_tokens, 0);
+        st.set_consumed("%1", 500);
+        assert_eq!(st.sessions()[0].consumed_tokens, 500);
+        st.set_consumed("%1", 400); // 回退被守卫忽略（单调）
+        assert_eq!(st.sessions()[0].consumed_tokens, 500);
+        st.set_consumed("%1", 900);
+        assert_eq!(st.sessions()[0].consumed_tokens, 900);
+    }
+
+    #[test]
+    fn stable_key_prefers_session_id_else_pane() {
+        let mut st = StateStore::new();
+        let mut e = ev(EventKind::SessionStart, 0);
+        e.session_id = Some("sess-abc".into());
+        st.apply(e);
+        assert_eq!(st.sessions()[0].stable_key(), "sess-abc");
+        let mut st2 = StateStore::new();
+        st2.apply(ev(EventKind::SessionStart, 0)); // 无 session_id
+        assert_eq!(st2.sessions()[0].stable_key(), "%1");
+    }
+
+    #[test]
+    fn session_start_reset_zeroes_consumed() {
+        let mut st = StateStore::new();
+        st.apply(ev(EventKind::UserPromptSubmit, 1000));
+        st.set_consumed("%1", 500);
+        st.apply(ev(EventKind::SessionStart, 2000)); // 新会话复用 pane → 重置
+        assert_eq!(st.sessions()[0].consumed_tokens, 0, "新会话 consumed 归零");
     }
 
     #[test]

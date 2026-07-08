@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentKind {
     Claude,
@@ -141,6 +141,17 @@ mod tests {
         let json = serde_json::to_string(&AgentKind::Custom("hermes".into())).unwrap();
         assert_eq!(json, r#"{"custom":"hermes"}"#);
         assert_eq!(serde_json::to_string(&AgentKind::Claude).unwrap(), r#""claude""#);
+    }
+
+    #[test]
+    fn agent_kind_is_hashable() {
+        use std::collections::HashMap;
+        let mut m: HashMap<AgentKind, u64> = HashMap::new();
+        m.insert(AgentKind::Claude, 1);
+        m.insert(AgentKind::Codex, 2);
+        m.insert(AgentKind::Custom("x".into()), 3);
+        assert_eq!(m[&AgentKind::Claude], 1);
+        assert_eq!(m[&AgentKind::Custom("x".into())], 3);
     }
 
     #[test]

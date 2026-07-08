@@ -7,6 +7,7 @@ pub const TAIL_CAP: u64 = 262_144;
 #[derive(Debug, Default, Clone)]
 pub struct TranscriptCursor {
     pub offset: u64,
+    pub consumed: u64,
 }
 
 pub fn context_window(model: &str) -> Option<u64> {
@@ -70,6 +71,8 @@ pub fn read_update(path: &Path, cursor: &mut TranscriptCursor) -> Option<Session
         if model == "<synthetic>" { continue; }
         let Some(usage) = msg.get("usage") else { continue };
         let g = |k: &str| usage.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        // 单调 consumed：只累加新 token（排除 cache_read/cache_creation 避免重复计上下文）
+        cursor.consumed = cursor.consumed.saturating_add(g("input_tokens") + g("output_tokens"));
         let tokens = TokenTotals {
             input: g("input_tokens"),
             output: g("output_tokens"),
@@ -199,6 +202,33 @@ mod tests {
         writeln!(f, "{REAL_ASSISTANT}").unwrap();
         f.flush().unwrap();
         assert!(read_update(f.path(), &mut cur).is_some());
+    }
+
+    #[test]
+    fn consumed_accumulates_new_output_and_input_excluding_cache() {
+        // REAL_ASSISTANT: input_tokens=2, output_tokens=1045, cache_read=982162, cache_creation=705
+        // consumed delta = input+output = 1047，排除 cache_read/cache_creation
+        let f = write_lines(&[REAL_ASSISTANT, REAL_ASSISTANT]);
+        let mut cur = TranscriptCursor::default();
+        read_update(f.path(), &mut cur);
+        assert_eq!(cur.consumed, 1047 * 2, "两条真实 assistant 各累加 input+output=1047");
+    }
+
+    #[test]
+    fn consumed_skips_synthetic_and_is_monotonic_across_incremental_reads() {
+        let f = write_lines(&[REAL_ASSISTANT, SYNTHETIC, HEADER]);
+        let mut cur = TranscriptCursor::default();
+        read_update(f.path(), &mut cur);
+        assert_eq!(cur.consumed, 1047, "synthetic(0 usage)/header 不计");
+        let before = cur.consumed;
+        read_update(f.path(), &mut cur); // 无新行
+        assert_eq!(cur.consumed, before, "无新行 consumed 不变");
+        // 追加一条真实行
+        use std::io::Write;
+        let mut fh = std::fs::OpenOptions::new().append(true).open(f.path()).unwrap();
+        writeln!(fh, "{REAL_ASSISTANT}").unwrap(); fh.flush().unwrap();
+        read_update(f.path(), &mut cur);
+        assert_eq!(cur.consumed, before + 1047, "新行继续累加，单调");
     }
 
     #[test]
