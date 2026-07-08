@@ -23,17 +23,49 @@ fn trigger_enabled(cfg: &NotifyConfig, kind: NotifyKind) -> bool {
     }
 }
 
+/// minutes-since-midnight window membership; handles midnight wrap (start>end)。右开区间：[start, end)。
+fn in_window(now_min: u32, start_min: u32, end_min: u32) -> bool {
+    if start_min <= end_min { now_min >= start_min && now_min < end_min }
+    else { now_min >= start_min || now_min < end_min } // 跨夜窗口
+}
+
+/// "HH:MM" -> 当日分钟数；非法输入返回 None（绝不 panic）。
+fn parse_hm(s: &str) -> Option<u32> {
+    let (h, m) = s.split_once(':')?;
+    let h: u32 = h.parse().ok()?;
+    let m: u32 = m.parse().ok()?;
+    if h < 24 && m < 60 { Some(h * 60 + m) } else { None }
+}
+
+/// now_ms（epoch 毫秒）→ 本地时区当日分钟数，经 libc localtime_r。
+fn local_now_min(now_ms: u64) -> u32 {
+    let t = (now_ms / 1000) as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&t, &mut tm); }
+    (tm.tm_hour as u32) * 60 + (tm.tm_min as u32)
+}
+
+/// 静默窗口是否应吞掉该 kind 的通知：quiet_hours 已配置、start/end 均合法解析、
+/// 当前本地时刻落在窗口内、且该 kind 不在 quiet_hours_exempt 白名单中。
+/// 任一前提不满足（含 start/end 解析失败）一律返回 false——绝不因坏配置误抑制。
+fn quiet_suppresses(cfg: &NotifyConfig, kind: NotifyKind, now_ms: u64) -> bool {
+    let Some(qh) = &cfg.quiet_hours else { return false };
+    let Some(start_min) = parse_hm(&qh.start) else { return false };
+    let Some(end_min) = parse_hm(&qh.end) else { return false };
+    if !in_window(local_now_min(now_ms), start_min, end_min) { return false; }
+    !cfg.quiet_hours_exempt.iter().any(|e| e == kind.as_str())
+}
+
 pub struct Discipline {
     prev: HashMap<String, Option<NotifyKind>>,     // stable_key -> 上次触发态（None=非触发态）
     cooldown: HashMap<(String, NotifyKind), u64>,  // 上次发送 ts（仅压制停在同态内的重复）
-    generation: HashMap<String, u64>,              // stable_key -> 单调 generation
     dead_pending: HashMap<String, u64>,            // stable_key -> 连续 Dead 轮数
     boot_until_ms: u64,
 }
 
 impl Discipline {
     pub fn new(boot_grace_secs: u64, now_ms: u64) -> Self {
-        Self { prev: HashMap::new(), cooldown: HashMap::new(), generation: HashMap::new(),
+        Self { prev: HashMap::new(), cooldown: HashMap::new(),
                dead_pending: HashMap::new(), boot_until_ms: now_ms + boot_grace_secs * 1000 }
     }
 
@@ -70,6 +102,11 @@ impl Discipline {
             let Some(kind) = new_kind else { self.dead_pending.remove(&key); continue };
             if !trigger_enabled(cfg, kind) { continue; }
 
+            // 静默窗口：非 exempt kind 在窗口内直接吞（exempt 默认含 "dead"，照常发）。
+            // 限制：`prev`/dead_pending 等状态照常推进，静默期内被吞的边沿不会在窗口结束后补发——
+            // 一个在静默期就已进入触发态、且窗口结束时仍停在该态的会话不会补通知（勿扰优先，可接受）。
+            if quiet_suppresses(cfg, kind, now_ms) { continue; }
+
             // dead 去抖 vs 非 dead 边沿门：
             // dead 跨【连续轮】计数（不 gate 在 is_edge——连续 Dead 轮 new==old 非边沿，但仍要累加）；
             // 恰在第 threshold 轮发一次，之后 *n>threshold 不再发。离开 Dead 时上面的 leave 块已清 dead_pending。
@@ -91,7 +128,6 @@ impl Discipline {
             if in_grace { continue; } // boot grace 抑制（基线已由 seed/prev 更新，grace 后新边沿正常发）
 
             self.cooldown.insert(cd_key, now_ms);
-            let gen = { let g = self.generation.entry(key.clone()).or_insert(0); *g += 1; *g };
             let name = s.session_name.clone();
             let disp = name.clone().unwrap_or_else(|| s.pane_id.clone());
             let (title, body) = match kind {
@@ -101,7 +137,7 @@ impl Discipline {
                 NotifyKind::Dead => (format!("{disp} 已退出(dead)"), "agent 进程结束".into()),
             };
             out.push(NotifyEvent { session_key: key, pane_id: s.pane_id.clone(), session_name: name,
-                kind, generation: gen, title, body });
+                kind, title, body });
         }
         out
     }
@@ -228,5 +264,57 @@ mod tests {
         let e = d.edges(&Discipline::snapshot_states(&[sess("%1", SessionState::Working)]),
                         &[sess("%1", SessionState::Done)], &cfg, 0);
         assert!(e.is_empty(), "done 默认关不发");
+    }
+
+    // ---- F1: quiet_hours enforcement ----
+
+    #[test]
+    fn in_window_no_wrap() {
+        assert!(in_window(12 * 60, 9 * 60, 17 * 60), "12:00 在 09:00-17:00 内");
+        assert!(!in_window(8 * 60, 9 * 60, 17 * 60), "08:00 在 09:00-17:00 外");
+        assert!(!in_window(20 * 60, 9 * 60, 17 * 60), "20:00 在 09:00-17:00 外");
+    }
+
+    #[test]
+    fn in_window_wraps_midnight() {
+        assert!(in_window(2 * 60, 23 * 60, 8 * 60), "02:00 在 23:00-08:00(跨夜) 内");
+        assert!(!in_window(12 * 60, 23 * 60, 8 * 60), "12:00 在 23:00-08:00(跨夜) 外");
+        assert!(in_window(23 * 60 + 30, 23 * 60, 8 * 60), "23:30 在 23:00-08:00(跨夜) 内");
+        assert!(!in_window(8 * 60, 23 * 60, 8 * 60), "08:00 是右开区间，不在窗口内");
+    }
+
+    #[test]
+    fn parse_hm_valid_and_invalid() {
+        assert_eq!(parse_hm("00:00"), Some(0));
+        assert_eq!(parse_hm("23:59"), Some(23 * 60 + 59));
+        assert_eq!(parse_hm("25:00"), None, "小时越界");
+        assert_eq!(parse_hm("12:60"), None, "分钟越界");
+        assert_eq!(parse_hm("abc"), None, "非法格式");
+    }
+
+    #[test]
+    fn quiet_suppresses_edge_but_exempt_kind_still_fires() {
+        let mut d = Discipline::new(0, 0);
+        let mut cfg = all_on();
+        cfg.discipline.dead_debounce_ticks = 1;
+        // 静默窗口覆盖当前本地时刻（[now, now+2h]），确保测试在任意运行时刻都确定。
+        let now_ms = crate::daemon::now_ms();
+        let now_min = local_now_min(now_ms);
+        let start_min = now_min;
+        let end_min = (now_min + 120) % (24 * 60);
+        let fmt = |m: u32| format!("{:02}:{:02}", m / 60, m % 60);
+        cfg.quiet_hours = Some(crate::config::QuietHours { start: fmt(start_min), end: fmt(end_min) });
+        // quiet_hours_exempt 默认 ["dead"]（NotifyConfig::default 通过 all_on 继承）
+
+        // waiting_input（非 exempt）：静默窗口内应被抑制
+        let e1 = d.edges(&Discipline::snapshot_states(&[sess("%1", SessionState::Working)]),
+                         &[sess("%1", waiting())], &cfg, now_ms);
+        assert!(e1.is_empty(), "静默窗口内非 exempt kind 应被抑制");
+
+        // dead（exempt）：静默窗口内仍应正常发（dead_debounce_ticks=1，首轮即发）
+        let e2 = d.edges(&Discipline::snapshot_states(&[sess("%2", SessionState::Working)]),
+                         &[sess("%2", SessionState::Dead)], &cfg, now_ms);
+        assert_eq!(e2.len(), 1, "静默窗口内 exempt kind（dead）应绕过抑制照常发");
+        assert!(matches!(e2[0].kind, NotifyKind::Dead));
     }
 }

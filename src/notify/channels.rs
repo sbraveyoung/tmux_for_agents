@@ -104,7 +104,7 @@ fn http_send(ev: &NotifyEvent, http: &crate::config::HttpChannel) {
     } else {
         http.url.clone()
     };
-    let timeout = Duration::from_millis(http.timeout_ms.min(10_000));
+    let timeout = Duration::from_millis(http.timeout_ms.clamp(200, 10_000));
     let mut req = ureq::post(&target).config().timeout_global(Some(timeout)).build();
     for (k, v) in &http.headers { req = req.header(k.as_str(), v.as_str()); }
     let _ = req.send_json(payload); // 失败静默吞
@@ -117,7 +117,7 @@ mod tests {
 
     fn ev() -> NotifyEvent {
         NotifyEvent { session_key: "sess-1".into(), pane_id: "%3".into(), session_name: Some("api".into()),
-            kind: NotifyKind::WaitingInput, generation: 1, title: "api 等待输入".into(), body: "needs permission".into() }
+            kind: NotifyKind::WaitingInput, title: "api 等待输入".into(), body: "needs permission".into() }
     }
 
     #[test]

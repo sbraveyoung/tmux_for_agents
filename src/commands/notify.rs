@@ -7,7 +7,7 @@ pub fn run(sub: &str) {
     let cfg = Config::load();
     let ev = NotifyEvent {
         session_key: "test".into(), pane_id: "%0".into(), session_name: Some("tfa".into()),
-        kind: NotifyKind::WaitingInput, generation: 0,
+        kind: NotifyKind::WaitingInput,
         title: "tfa 通知测试".into(),
         body: match sub { "test" => "如果你看到这条，通知通道工作正常".into(), _ => "notify".into() },
     };

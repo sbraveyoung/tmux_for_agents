@@ -20,13 +20,11 @@ impl NotifyKind {
 
 #[derive(Debug, Clone)]
 pub struct NotifyEvent {
-    #[allow(dead_code)] // read by Task 6 discipline's cooldown/generation bookkeeping
+    #[allow(dead_code)] // read by Task 6 discipline's cooldown bookkeeping
     pub session_key: String,
     pub pane_id: String,
     pub session_name: Option<String>,
     pub kind: NotifyKind,
-    #[allow(dead_code)] // read by Task 6 discipline's edge-detection bookkeeping
-    pub generation: u64,
     pub title: String,
     pub body: String,
 }

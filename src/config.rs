@@ -19,7 +19,8 @@ pub struct NotifyConfig {
     pub discipline: DisciplineConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
 pub struct QuietHours { pub start: String, pub end: String }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -158,5 +159,19 @@ quiet_hours = { start = "23:00", end = "08:00" }
     fn garbage_toml_falls_back_to_default_not_panic() {
         let c = Config::from_toml_str("this is not : valid = toml = [");
         assert!(c.notify.enabled); // 坏输入→默认，绝不 panic
+    }
+
+    #[test]
+    fn partial_quiet_hours_does_not_reset_whole_config() {
+        // 只给 quiet_hours.start，不给 end：QuietHours 若无 #[serde(default)]，
+        // 反序列化整体失败 → from_toml_str 的 unwrap_or_default() 把整个 Config 打回默认，
+        // 连同一份 toml 里设置的其它字段（这里是 triggers.done）也一起丢了。
+        let c = Config::from_toml_str(r#"
+[notify.triggers]
+done = true
+[notify.quiet_hours]
+start = "23:00"
+"#);
+        assert!(c.notify.triggers.done, "quiet_hours 部分表不应把整个 config 打回默认");
     }
 }
