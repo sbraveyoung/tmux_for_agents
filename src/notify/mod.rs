@@ -1,4 +1,5 @@
 pub mod channels;
+pub mod discipline;
 
 use crate::config::Config;
 use std::sync::mpsc::Receiver;
@@ -7,11 +8,8 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)] // Eq+Hash：Discipline 用作 HashMap 键
 pub enum NotifyKind {
     WaitingInput,
-    #[allow(dead_code)] // Task 6 discipline fires this trigger
     Done,
-    #[allow(dead_code)] // Task 6 discipline fires this trigger
     Stale,
-    #[allow(dead_code)] // Task 6 discipline fires this trigger
     Dead,
 }
 impl NotifyKind {
@@ -34,7 +32,6 @@ pub struct NotifyEvent {
 }
 
 /// 唯一消费队列的独立线程：串行派发，通道 IO 各带超时，绝不阻塞其它线程。
-#[allow(dead_code)] // wired into the daemon by Task 6 (discipline is the mpsc producer)
 pub fn spawn_notifier(rx: Receiver<NotifyEvent>, cfg: Arc<Mutex<Config>>) {
     std::thread::spawn(move || {
         for ev in rx {

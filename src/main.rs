@@ -4,7 +4,7 @@ mod daemon;
 mod notify;
 mod paths;
 
-#[allow(dead_code)] // remaining discipline-only fields consumed by Task 6
+#[allow(dead_code)] // quiet_hours fields: no consumer yet (not in scope of Task 6's discipline)
 mod config;
 
 mod event;

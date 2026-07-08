@@ -29,6 +29,18 @@ pub fn run() -> anyhow::Result<()> {
     let dirty = Arc::new(AtomicBool::new(false));
     let quota = Arc::new(Mutex::new(crate::quota::QuotaCache::new()));
 
+    // 通知管道：config 加载一次、常驻 notifier 线程消费 mpsc，Discipline 用快照恢复的
+    // 既有会话播种基线（避免快照重启把「早已在等待」的旧会话误判成新边沿重复发送）。
+    let config = Arc::new(Mutex::new(crate::config::Config::load()));
+    let (notify_tx, notify_rx) = std::sync::mpsc::channel::<crate::notify::NotifyEvent>();
+    crate::notify::spawn_notifier(notify_rx, Arc::clone(&config));
+    let discipline = Arc::new(Mutex::new({
+        let boot = config.lock().unwrap_or_else(std::sync::PoisonError::into_inner).notify.discipline.boot_grace_secs;
+        let mut d = crate::notify::discipline::Discipline::new(boot, now_ms());
+        d.seed(&store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).sessions());
+        d
+    }));
+
     // 后台维护线程：快照 + prune（5s）、tmux 存活（可配置，默认 10s）
     {
         let store = Arc::clone(&store);
@@ -57,10 +69,13 @@ pub fn run() -> anyhow::Result<()> {
         });
     }
 
-    crate::scanner::spawn(Arc::clone(&store), Arc::clone(&dirty), Arc::clone(&quota));
+    crate::scanner::spawn(
+        Arc::clone(&store), Arc::clone(&dirty), Arc::clone(&quota),
+        Arc::clone(&config), Arc::clone(&discipline), notify_tx.clone(),
+    );
 
     let listener = UnixListener::bind(&sock_path)?;
-    server::serve(listener, store, dirty, quota); // 阻塞 accept 循环
+    server::serve(listener, store, dirty, quota, config, discipline, notify_tx); // 阻塞 accept 循环
     Ok(())
 }
 

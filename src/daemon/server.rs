@@ -1,23 +1,48 @@
+use crate::config::Config;
 use crate::event::AgentEvent;
+use crate::notify::discipline::Discipline;
+use crate::notify::NotifyEvent;
 use crate::protocol::{Request, Response};
 use crate::quota::QuotaCache;
 use crate::state::StateStore;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-pub fn serve(listener: UnixListener, store: Arc<Mutex<StateStore>>, dirty: Arc<AtomicBool>, quota: Arc<Mutex<QuotaCache>>) {
+#[allow(clippy::too_many_arguments)]
+pub fn serve(
+    listener: UnixListener,
+    store: Arc<Mutex<StateStore>>,
+    dirty: Arc<AtomicBool>,
+    quota: Arc<Mutex<QuotaCache>>,
+    config: Arc<Mutex<Config>>,
+    discipline: Arc<Mutex<Discipline>>,
+    tx: Sender<NotifyEvent>,
+) {
     for conn in listener.incoming() {
         let Ok(stream) = conn else { continue };
         let store = Arc::clone(&store);
         let dirty = Arc::clone(&dirty);
         let quota = Arc::clone(&quota);
-        std::thread::spawn(move || handle(stream, store, dirty, quota));
+        let config = Arc::clone(&config);
+        let discipline = Arc::clone(&discipline);
+        let tx = tx.clone();
+        std::thread::spawn(move || handle(stream, store, dirty, quota, config, discipline, tx));
     }
 }
 
-fn handle(stream: UnixStream, store: Arc<Mutex<StateStore>>, dirty: Arc<AtomicBool>, quota: Arc<Mutex<QuotaCache>>) {
+#[allow(clippy::too_many_arguments)]
+fn handle(
+    stream: UnixStream,
+    store: Arc<Mutex<StateStore>>,
+    dirty: Arc<AtomicBool>,
+    quota: Arc<Mutex<QuotaCache>>,
+    config: Arc<Mutex<Config>>,
+    discipline: Arc<Mutex<Discipline>>,
+    tx: Sender<NotifyEvent>,
+) {
     let mut writer = match stream.try_clone() {
         Ok(w) => w,
         Err(_) => return,
@@ -26,14 +51,23 @@ fn handle(stream: UnixStream, store: Arc<Mutex<StateStore>>, dirty: Arc<AtomicBo
     for line in reader.lines() {
         let Ok(line) = line else { return };
         if line.trim().is_empty() { continue; }
-        let resp = respond(&line, &store, &dirty, &quota);
+        let resp = respond(&line, &store, &dirty, &quota, &config, &discipline, &tx);
         let mut out = serde_json::to_string(&resp).unwrap_or_default();
         out.push('\n');
         if writer.write_all(out.as_bytes()).is_err() { return; }
     }
 }
 
-fn respond(line: &str, store: &Mutex<StateStore>, dirty: &AtomicBool, quota: &Mutex<QuotaCache>) -> Response {
+#[allow(clippy::too_many_arguments)]
+fn respond(
+    line: &str,
+    store: &Mutex<StateStore>,
+    dirty: &AtomicBool,
+    quota: &Mutex<QuotaCache>,
+    config: &Mutex<Config>,
+    discipline: &Mutex<Discipline>,
+    tx: &Sender<NotifyEvent>,
+) -> Response {
     let req: Request = match serde_json::from_str(line) {
         Ok(r) => r,
         Err(e) => return Response::Error { message: format!("bad request: {e}") },
@@ -46,18 +80,28 @@ fn respond(line: &str, store: &Mutex<StateStore>, dirty: &AtomicBool, quota: &Mu
             match AgentEvent::from_hook(&agent, &event, &pane, &payload, super::now_ms()) {
                 Some(ev) => {
                     let pane = ev.pane_id.clone();
-                    let needs_name = {
+                    // 净边沿计算在锁内完成（before 快照 → apply → after 快照 → edges）；
+                    // tx.send 在锁外（护栏：hook 路径的通道 IO 只归 notifier 线程，respond()
+                    // 这里只负责在锁内收集 NotifyEvent，出锁后非阻塞入队）。
+                    let (needs_name, evs) = {
                         let mut st = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let before = Discipline::snapshot_states(&st.sessions());
                         st.apply(ev);
-                        st.sessions().iter()
+                        let after = st.sessions();
+                        let needs_name = after.iter()
                             .find(|s| s.pane_id == pane)
-                            .is_some_and(|s| s.session_name.is_none())
+                            .is_some_and(|s| s.session_name.is_none());
+                        let cfg = config.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+                        let evs = discipline.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .edges(&before, &after, &cfg.notify, super::now_ms());
+                        (needs_name, evs)
                     };
                     if needs_name {
                         if let Some(name) = resolve_session_name(&pane) {
                             store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).set_session_name(&pane, name);
                         }
                     }
+                    for ev in evs { let _ = tx.send(ev); }
                     dirty.store(true, Ordering::Relaxed);
                     Response::Ok
                 }

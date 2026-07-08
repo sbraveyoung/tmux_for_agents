@@ -7,6 +7,9 @@
 
 pub mod procs;
 
+use crate::config::Config;
+use crate::notify::discipline::Discipline;
+use crate::notify::NotifyEvent;
 use crate::quota::burn::BurnSampler;
 use crate::quota::QuotaCache;
 use crate::sources::claude_jsonl::{self, TranscriptCursor};
@@ -14,6 +17,7 @@ use crate::state::StateStore;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 fn scan_interval_ms() -> u64 {
@@ -26,7 +30,14 @@ fn scan_interval_ms() -> u64 {
 /// Starts the background scanner thread. A no-op when `TFA_NO_SCAN=1` —
 /// existing daemon tests written against M1-only behavior opt out this way
 /// rather than tolerate scanner side effects they don't expect.
-pub fn spawn(store: Arc<Mutex<StateStore>>, dirty: Arc<AtomicBool>, quota: Arc<Mutex<QuotaCache>>) {
+pub fn spawn(
+    store: Arc<Mutex<StateStore>>,
+    dirty: Arc<AtomicBool>,
+    quota: Arc<Mutex<QuotaCache>>,
+    config: Arc<Mutex<Config>>,
+    discipline: Arc<Mutex<Discipline>>,
+    tx: Sender<NotifyEvent>,
+) {
     if std::env::var("TFA_NO_SCAN").as_deref() == Ok("1") {
         return;
     }
@@ -36,7 +47,7 @@ pub fn spawn(store: Arc<Mutex<StateStore>>, dirty: Arc<AtomicBool>, quota: Arc<M
         let mut burn = BurnSampler::new(crate::config::Config::load().quota.burn_rate_window_mins);
         loop {
             std::thread::sleep(std::time::Duration::from_millis(scan_interval_ms()));
-            if tick(&store, &mut cursors, &mut cursor_paths, crate::daemon::now_ms(), &mut burn, &quota) {
+            if tick(&store, &mut cursors, &mut cursor_paths, crate::daemon::now_ms(), &mut burn, &quota, &config, &discipline, &tx) {
                 dirty.store(true, Ordering::Relaxed);
             }
         }
@@ -59,6 +70,7 @@ pub fn spawn(store: Arc<Mutex<StateStore>>, dirty: Arc<AtomicBool>, quota: Arc<M
 ///
 /// Returns whether the round produced any (potential) change, so the caller
 /// can flag the shared `dirty` bit for the snapshot writer.
+#[allow(clippy::too_many_arguments)]
 pub fn tick(
     store: &Mutex<StateStore>,
     cursors: &mut HashMap<String, TranscriptCursor>,
@@ -66,7 +78,15 @@ pub fn tick(
     now_ms: u64,
     burn: &mut BurnSampler,
     quota: &Mutex<QuotaCache>,
+    config: &Mutex<Config>,
+    discipline: &Mutex<Discipline>,
+    tx: &Sender<NotifyEvent>,
 ) -> bool {
+    // tick 开头：在本轮任何 mutation 之前拍 before 快照（通知边沿 diff 的基线）。
+    let before = {
+        let st = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        Discipline::snapshot_states(&st.sessions())
+    };
     // list_panes→lock TOCTOU: a pane can get hooked between this snapshot and
     // the state-store lock below, so a brand-new hook-reported session can be
     // absent from `live` and get marked Dead for (at most) this one round;
@@ -211,6 +231,12 @@ pub fn tick(
     };
     burn.sample(&samples, now_ms);
     quota.lock().unwrap_or_else(std::sync::PoisonError::into_inner).refresh(burn, now_ms);
+
+    // —— 通知纪律：tick 边界快照 diff → 净边沿 → mpsc 入队（锁外发送）——
+    let after = { store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).sessions() };
+    let cfg = { config.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() };
+    let evs = { discipline.lock().unwrap_or_else(std::sync::PoisonError::into_inner).edges(&before, &after, &cfg.notify, now_ms) };
+    for ev in evs { let _ = tx.send(ev); }
 
     true
 }
