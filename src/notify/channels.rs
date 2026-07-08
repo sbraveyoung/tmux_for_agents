@@ -146,11 +146,16 @@ mod tests {
 
     #[test]
     fn no_notify_env_routes_to_sink_not_real_dispatch() {
+        // isolate the notify-sink.jsonl write to a tempdir so the test never
+        // touches a real ~/.local/state/tfa/ (a live daemon's state dir).
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("TFA_STATE_DIR", dir.path());
         std::env::set_var("TFA_NO_NOTIFY", "1");
         test_sink_clear();
         let cfg = crate::config::NotifyConfig::default(); // macos+tmux on, http off
         dispatch(&ev(), &cfg);
         std::env::remove_var("TFA_NO_NOTIFY");
+        std::env::remove_var("TFA_STATE_DIR");
         let sunk = test_sink_take();
         assert_eq!(sunk.len(), 1, "TFA_NO_NOTIFY 下事件进 sink，不真发");
         assert_eq!(sunk[0].kind.as_str(), "waiting_input");
