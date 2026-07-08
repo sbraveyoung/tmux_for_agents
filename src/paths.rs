@@ -32,6 +32,13 @@ pub fn projects_dir() -> PathBuf {
     })
 }
 
+pub fn config_path() -> PathBuf {
+    env_path("TFA_CONFIG_PATH").unwrap_or_else(|| {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        home.join(".config/tfa/config.toml")
+    })
+}
+
 /// tmux 调用的额外参数（隔离测试用 -L <name>）
 pub fn tmux_args() -> Vec<String> {
     match std::env::var("TFA_TMUX_SOCKET") {
@@ -115,5 +122,13 @@ mod tests {
         assert_eq!(socket_path(), PathBuf::from("/x/y.sock"));
         std::env::remove_var("TFA_SOCKET");
         std::env::remove_var("XDG_RUNTIME_DIR");
+
+        // Test 10: TFA_CONFIG_PATH 覆写
+        std::env::set_var("TFA_CONFIG_PATH", "/tmp/tfa-test.toml");
+        assert_eq!(config_path(), PathBuf::from("/tmp/tfa-test.toml"));
+        std::env::remove_var("TFA_CONFIG_PATH");
+        // Test 11: 缺省 → ~/.config/tfa/config.toml
+        let cp = config_path();
+        assert!(cp.to_string_lossy().ends_with(".config/tfa/config.toml"));
     }
 }

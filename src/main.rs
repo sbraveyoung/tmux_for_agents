@@ -3,6 +3,9 @@ mod commands;
 mod daemon;
 mod paths;
 
+#[allow(dead_code)] // consumed by notifier/discipline from Task 5-6
+mod config;
+
 mod event;
 
 mod protocol;
