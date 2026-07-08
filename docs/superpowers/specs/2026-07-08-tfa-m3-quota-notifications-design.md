@@ -100,7 +100,6 @@ NotifyEvent {
   session_id: String,              // 冷却/去重键（非裸 pane_id）
   pane_id: String,
   kind: WaitingInput | Done | Stale | Dead,   // quota_alert 推后，M3 无此 kind
-  generation: u64,                 // per-session 单调，派发端丢弃被取代的过期事件
   title: String,
   body: String,
 }
@@ -121,7 +120,7 @@ NotifyEvent {
 
 **boot-grace 挡「重启即轰炸」（I4）**：daemon 因 tmux 退出 exit(0)+autospawn 频繁重启，通知器内存态重启即空。启动即以「快照加载到的既有会话状态」为边沿基线（首次观测同态不算跳变）；再加 `boot_grace_secs`（默认 30s）启动抑制期。这样不动快照就挡住轰炸。
 
-**generation 校验（锁内产出、锁外派发之间状态再变，I5）**：每会话单调 `generation`；NotifyEvent 携带产出时 generation；notifier 线程发送前二次校验会话当前 generation 未落后，否则丢弃过期/错序事件。派发由 notifier 单线程独占串行化。
+**过期/错序防护（I5，实现修订）**：派发由 notifier **单线程独占 + FIFO mpsc 队列**串行化——事件按产出顺序到达、按顺序派发，天然不错序；同态重复由**边沿冷却**压制。M3 实测这两者已足够，故**不引入 generation 二次校验**（早期设计的 generation 字段在最终评审时移除：它需要 notifier 反向持有 Discipline、增加热路径锁竞争，收益仅是「偶发一条略陈旧的通知」）。若未来出现多消费者/多线程派发再重新引入。
 
 **dead 去抖（I12）**：`reconcile_liveness` 在 tmux 部分缺失 pane 列表时会批量标 Dead。dead 通知需连续 K 轮（`dead_debounce_ticks` 默认 2）判死才发；下轮 pane 回来复活即撤销。
 
@@ -168,7 +167,7 @@ NotifyEvent {
 
 ## 11. 测试策略
 
-- **通知纪律**：纯逻辑单测——边沿快照 diff、边沿冷却（重点：应答后再等输入必须放行）、stale/dead 拆分与升级、boot-grace 抑制、generation 丢弃过期事件、dead 去抖。
+- **通知纪律**：纯逻辑单测——边沿快照 diff、边沿冷却（重点：应答后再等输入必须放行）、stale/dead 拆分与升级、boot-grace 抑制、dead 去抖、quiet_hours 窗口（含跨午夜 + 豁免集）。
 - **通道 dispatch**：单测通道选择/格式化（bark/ntfy/generic-json payload 形状）、超时参数、url 空跳过。
 - **burn/consumed**：单测 consumed 累加（排除 cache_read）、只加正 delta、prune/重置/漂移贡献 0、5h 窗口滚动、percent 恒 None。
 - **快照兼容 e2e**：M1/M2 快照仍能 load（新态不进快照的钉子）。
@@ -182,7 +181,7 @@ NotifyEvent {
 ③ **burn 采样器**（provider 聚合、只加正 delta、环形缓冲、5h 滚动窗口、重置另起序列；写 QuotaCache）。
 ④ **LocalEstimateProvider + QuotaState 接入 `tfa list`/`status --format json`**（percent 恒 None、observed ≥ 命名、source/freshness 内联）。
 ⑤ **notifier core + `tfa notify send`/`test`**（独立线程 + mpsc 队列 + 硬超时 + ureq + 三通道纯派发）。**完成即用户真机 `tfa notify test` 独立验收三通道**（CLAUDE.md 逐个验收纪律 + TCC 交互）再进 ⑥。
-⑥ **通知纪律 + 四触发接线**（tick 边界快照 diff、边沿冷却、stale/dead 拆分、boot-grace、generation、dead 去抖；接 waiting_input/done/stale/dead；hook 护栏）。
+⑥ **通知纪律 + 四触发接线**（tick 边界快照 diff、边沿冷却、stale/dead 拆分、boot-grace、dead 去抖、quiet_hours 豁免；接 waiting_input/done/stale/dead；hook 护栏）。
 ⑦ **e2e + 文档 + 真装验收**（含 no-clients 非致命、快照兼容 e2e；Bark/ntfy 配置指引 + APNs 需外网诚实说明）。
 
 ## 13. config schema（`~/.config/tfa/config.toml`，缺失全默认）
