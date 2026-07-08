@@ -1,9 +1,10 @@
 mod client;
 mod commands;
 mod daemon;
+mod notify;
 mod paths;
 
-#[allow(dead_code)] // consumed by notifier/discipline from Task 5-6
+#[allow(dead_code)] // remaining discipline-only fields consumed by Task 6
 mod config;
 
 mod event;
@@ -40,6 +41,12 @@ enum Command {
     },
     /// Dump full state as JSON
     List,
+    /// Send or test notifications
+    Notify {
+        /// "test" | "send"
+        #[arg(default_value = "test")]
+        action: String,
+    },
 }
 
 fn main() {
@@ -60,5 +67,6 @@ fn main() {
             }
             _ => println!("{{\"sessions\":[],\"quota\":[]}}"),
         },
+        Command::Notify { action } => commands::notify::run(&action),
     }
 }
