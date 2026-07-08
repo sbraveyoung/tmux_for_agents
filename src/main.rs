@@ -16,6 +16,9 @@ mod sources;
 
 mod scanner;
 
+#[allow(dead_code)] // consumed by daemon/scanner from Task 4
+mod quota;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
