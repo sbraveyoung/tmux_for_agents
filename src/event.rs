@@ -17,7 +17,6 @@ impl AgentKind {
             other => Self::Custom(other.to_string()),
         }
     }
-    #[allow(dead_code)] // no production consumer yet; exercised by agent_kind_mapping_table test
     pub fn label(&self) -> &str {
         match self {
             Self::Claude => "claude",
