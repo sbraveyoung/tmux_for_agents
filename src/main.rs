@@ -18,6 +18,8 @@ mod scanner;
 
 mod quota;
 
+mod tui;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -46,6 +48,8 @@ enum Command {
         #[arg(default_value = "test")]
         action: String,
     },
+    /// Interactive full-screen dashboard (run inside tmux)
+    Tui,
 }
 
 fn main() {
@@ -67,5 +71,6 @@ fn main() {
             _ => println!("{{\"sessions\":[],\"quota\":[]}}"),
         },
         Command::Notify { action } => commands::notify::run(&action),
+        Command::Tui => commands::tui::run(),
     }
 }

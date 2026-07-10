@@ -5,7 +5,7 @@ fn help_lists_subcommands() {
     let mut cmd = Command::cargo_bin("tfa").unwrap();
     let assert = cmd.arg("--help").assert().success();
     let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    for sub in ["daemon", "hook", "status", "list"] {
+    for sub in ["daemon", "hook", "status", "list", "tui"] {
         assert!(out.contains(sub), "missing subcommand {sub}");
     }
 }
