@@ -7,6 +7,8 @@ use ratatui::Frame;
 
 pub fn draw(f: &mut Frame, model: &Model) {
     let conn = if model.connected { "已连接" } else { "重连中…" };
-    let text = format!("tfa tui — {} 个会话 · {conn} · q 退出", model.sessions.len());
+    let sel = model.selected_session().map(|s| s.pane_id.as_str()).unwrap_or("-");
+    let err = model.nav_error.as_deref().unwrap_or("");
+    let text = format!("tfa tui — {} 个会话 · 选中 {sel} · {conn} {err} · q 退出", model.sessions.len());
     f.render_widget(Paragraph::new(text), f.area());
 }

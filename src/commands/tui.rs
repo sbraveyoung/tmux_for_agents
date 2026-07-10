@@ -15,9 +15,10 @@ use std::time::Duration;
 const EVENT_POLL: Duration = Duration::from_millis(150);
 
 pub fn run() {
+    let in_tmux = std::env::var_os("TMUX").is_some();
     let (tx, rx) = mpsc::channel();
     poll::spawn(tx);
-    let mut model = Model::new();
+    let mut model = Model::new(in_tmux);
     let mut terminal = ratatui::init();
     let res = event_loop(&mut terminal, &mut model, &rx);
     ratatui::restore();
@@ -44,6 +45,7 @@ fn event_loop(
                     match model.handle_key(key) {
                         Action::Quit => return Ok(()),
                         Action::Redraw => dirty = true,
+                        Action::Navigate(_pane) => {} // nav 执行在 Task 5（nav.rs）接线
                         Action::None => {}
                     }
                 }
