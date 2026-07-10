@@ -16,11 +16,12 @@ const EVENT_POLL: Duration = Duration::from_millis(150);
 
 pub fn run() {
     let in_tmux = std::env::var_os("TMUX").is_some();
+    let tfa_client = std::env::var("TFA_CLIENT").ok().filter(|s| !s.is_empty());
     let (tx, rx) = mpsc::channel();
     poll::spawn(tx);
     let mut model = Model::new(in_tmux);
     let mut terminal = ratatui::init();
-    let res = event_loop(&mut terminal, &mut model, &rx);
+    let res = event_loop(&mut terminal, &mut model, &rx, tfa_client.as_deref());
     ratatui::restore();
     if let Err(e) = res {
         eprintln!("tfa tui: {e}");
@@ -32,6 +33,7 @@ fn event_loop(
     terminal: &mut DefaultTerminal,
     model: &mut Model,
     rx: &mpsc::Receiver<PollMsg>,
+    tfa_client: Option<&str>,
 ) -> anyhow::Result<()> {
     let mut dirty = true;
     loop {
@@ -45,7 +47,17 @@ fn event_loop(
                     match model.handle_key(key) {
                         Action::Quit => return Ok(()),
                         Action::Redraw => dirty = true,
-                        Action::Navigate(_pane) => {} // nav 执行在 Task 5（nav.rs）接线
+                        Action::Navigate(pane_id) => {
+                            match crate::tui::nav::navigate(&pane_id, tfa_client) {
+                                // 跳转成功 → 主动退出进程（popup 的 -E 不因
+                                // switch-client 自动关闭，必须自己退，spec §7.3）
+                                Ok(()) => return Ok(()),
+                                Err(_) => {
+                                    model.nav_error = Some("该会话已结束，刷新中…".into());
+                                    dirty = true;
+                                }
+                            }
+                        }
                         Action::None => {}
                     }
                 }
