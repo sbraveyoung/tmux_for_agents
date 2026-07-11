@@ -30,11 +30,9 @@ pub fn nav_argv(tmux_args: &[String], tfa_client: Option<&str>, pane_id: &str) -
     v
 }
 
-/// 执行跳转。stdio 全捕获（spec §7.4：tmux 打到 stderr 的任何输出都会糊进
-/// raw mode + alternate screen 把界面搞花，绝不继承）。
-/// Ok(()) → 调用方退出 TUI（popup 随之关闭）；Err → 目标可能已死（≤1s 陈旧
-/// 窗口），调用方留在 TUI 报错，等下一次快照自然纠正。
-pub fn navigate(pane_id: &str, tfa_client: Option<&str>) -> Result<(), String> {
+/// 执行一次跳转链（无重试）。stdio 全捕获（spec §7.4：tmux 打到 stderr 的任何
+/// 输出都会糊进 raw mode + alternate screen 把界面搞花，绝不继承）。
+fn run_switch(pane_id: &str, tfa_client: Option<&str>) -> Result<(), String> {
     let argv = nav_argv(&crate::paths::tmux_args(), tfa_client, pane_id);
     let out = Command::new(&argv[0])
         .args(&argv[1..])
@@ -45,6 +43,29 @@ pub fn navigate(pane_id: &str, tfa_client: Option<&str>) -> Result<(), String> {
         Ok(())
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// 执行跳转。Ok(()) → 调用方退出 TUI（popup 随之关闭）；Err → 目标可能已死
+/// （≤1s 陈旧窗口），调用方留在 TUI 报错，等下一次快照自然纠正。
+///
+/// **`-c` 失败降级重试一次不带 `-c`（--stay 长驻侧栏场景，2026-07-12 增补）**：
+/// `--stay` 侧栏在 spawn 时把发起 client 的 tty 存进 `TFA_CLIENT` 环境变量，此后
+/// 整个进程生命周期都复用这一个值——但侧栏是长驻的，期间终端可能 detach/
+/// reattach（SSH 断线重连、`tmux attach` 换了个新 tty），存的 tty 就死了。带着
+/// 死 tty 的 `-c` 会让 `switch-client` 每次必错，Enter 从此永久失效，还只显示
+/// 「该会话已结束，刷新中…」这种误导性提示——目标其实还活着，错在 `-c` 指向的
+/// 发起 client，不在目标 pane。缓解：带 `-c` 的首次尝试失败时，退化重试一次不带
+/// `-c`——tmux 转而隐式推断当前 client，单 client 场景（绝大多数用户）下这个推断
+/// 天然正确；多 client 场景可能切错 client，但比「永久失效」好——参见 spec §7.1
+/// 「any behavior beats permanently broken」。只重试一次，不递归、不循环；
+/// `tfa_client` 为 `None`（未注入或已被 `sanitize_client` 拒绝）时行为不变——
+/// 单次尝试，不重试。
+pub fn navigate(pane_id: &str, tfa_client: Option<&str>) -> Result<(), String> {
+    match run_switch(pane_id, tfa_client) {
+        Ok(()) => Ok(()),
+        Err(_) if tfa_client.is_some() => run_switch(pane_id, None),
+        Err(e) => Err(e),
     }
 }
 

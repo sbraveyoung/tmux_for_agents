@@ -333,22 +333,42 @@ pub fn parse_color(name: &str) -> Option<Color> {
     }
 }
 
-/// 会话列标识：坐标齐全 → "name:w.p"；有名无坐标 → "name %id"；无名 → "%id"。
-/// 同一 tmux session 的多个 window/pane 可能各挂一个 agent——仅显示
-/// session_name 时同名行无法区分，精确坐标（如 `company:3.0`）才能定位到具体
-/// pane（Feature 目标，2026-07-12 用户验收增补）。
-pub fn display_name(s: &AgentSession) -> String {
+/// 会话列标识拆成 (基名, 坐标后缀)：坐标齐全 → (name, ":w.p")；有名无坐标 →
+/// (name, " %id")；无名 → (pane_id, "")。同一 tmux session 的多个 window/pane
+/// 可能各挂一个 agent——仅显示 session_name 时同名行无法区分，精确坐标（如
+/// `company:3.0`）才能定位到具体 pane（Feature 目标，2026-07-12 用户验收增补）。
+///
+/// 拆成两段是 truncation 正确性的前提（review 2026-07-12 修复项）：列表列宽有限
+/// 时只应该截基名，坐标后缀必须整段保留——`pad_display_keep_suffix` 依赖这个
+/// 拆分才能把「truncate」和「保留后缀」分开处理，见该函数与 `list_row`。
+pub fn display_name_parts(s: &AgentSession) -> (String, String) {
     match &s.session_name {
         Some(name) => match (s.window_index, s.pane_index) {
-            (Some(w), Some(p)) => format!("{name}:{w}.{p}"),
-            _ => format!("{name} {}", s.pane_id), // hook 先到、scanner 还没跑到这一轮
+            (Some(w), Some(p)) => (name.clone(), format!(":{w}.{p}")),
+            _ => (name.clone(), format!(" {}", s.pane_id)), // hook 先到、scanner 还没跑到这一轮
         },
-        None => s.pane_id.clone(),
+        None => (s.pane_id.clone(), String::new()),
     }
 }
 
+/// `display_name_parts` 拼回完整字符串——供不需要分别处理 base/suffix 的调用方
+/// （如详情栏若要整串标识）复用，语义与拆分前的旧实现完全一致。`list_row`
+/// 改走 `display_name_parts` + `pad_display_keep_suffix`（截断必须只吃 base），
+/// 此函数目前没有生产调用点，仅保留给未拆分 base/suffix 也无所谓的场景
+/// （现有 `display_name_*` 单测继续覆盖其契约）——`#[allow(dead_code)]` 是
+/// 有意保留，不是遗漏清理（review 2026-07-12 修复项）。
+#[allow(dead_code)]
+pub fn display_name(s: &AgentSession) -> String {
+    let (base, suffix) = display_name_parts(s);
+    format!("{base}{suffix}")
+}
+
 pub fn list_row(s: &AgentSession, generated_at_ms: u64) -> String {
-    let name = display_name(s);
+    // pad_display_keep_suffix (不是 pad_display(&display_name(s), …)): 长名字截断
+    // 只能吃 base，坐标后缀（:w.p / %id）必须整段保留，否则两个仅坐标不同的长
+    // 名字会被截成同一个可见前缀，disambiguation 功能名存实亡（review 2026-07-12
+    // 修复项）。
+    let (name_base, name_suffix) = display_name_parts(s);
     let model = s.model.as_deref().map(model_short).unwrap_or_else(|| "—".into());
     let ctx = match &s.context {
         Some(c) => match c.percent {
@@ -360,7 +380,7 @@ pub fn list_row(s: &AgentSession, generated_at_ms: u64) -> String {
     format!(
         "{} {} {} {} {} {}",
         pad_display(state_icon(&s.state), ICON_COL_WIDTH),
-        pad_display(&name, NAME_COL_WIDTH),
+        pad_display_keep_suffix(&name_base, &name_suffix, NAME_COL_WIDTH),
         pad_display(s.agent.label(), AGENT_COL_WIDTH),
         pad_display(&model, MODEL_COL_WIDTH),
         pad_display_right(&ctx, CTX_COL_WIDTH),
@@ -491,6 +511,38 @@ pub fn pad_display_right(s: &str, width: usize) -> String {
     } else {
         out
     }
+}
+
+/// Coordinate-aware sibling of `pad_display`: pads/truncates `base` + `suffix`
+/// to exactly `width` *display columns*, but truncation eats only `base` —
+/// `suffix` (the short ASCII `:w.p` / ` %id` coordinate tail from
+/// `display_name_parts`) always survives intact. Truncating the *combined*
+/// string (the old behavior — see `list_row`'s history) cuts from the right,
+/// so any name longer than `width` loses its suffix first; two rows that
+/// differ only by coordinates then render byte-identical, silently defeating
+/// the disambiguation feature the suffix exists for (review 2026-07-12 fix).
+///
+/// When `base` needs truncation but display-width rounding can't fill the
+/// budget exactly (a wide CJK char doesn't fit the last column), the result
+/// is padded with trailing spaces after `suffix` so the total is always
+/// exactly `width` — same contract as `pad_display`.
+pub fn pad_display_keep_suffix(base: &str, suffix: &str, width: usize) -> String {
+    let suffix_w = suffix.width();
+    if suffix_w >= width {
+        // Degenerate case (shouldn't happen in practice — suffix is a short
+        // ASCII coordinate like ":12.3" or " %137" — but guarded so
+        // `width - suffix_w` below never underflows): no room left for any
+        // base at all, so fall back to padding/truncating the suffix alone.
+        return pad_display(suffix, width);
+    }
+    let base_budget = width - suffix_w;
+    let truncated_base = truncate_display(base, base_budget);
+    let mut out = format!("{truncated_base}{suffix}");
+    let dw = out.width();
+    if dw < width {
+        out.push_str(&" ".repeat(width - dw));
+    }
+    out
 }
 
 pub fn source_label(s: Source) -> &'static str {
@@ -676,6 +728,56 @@ mod tests {
     }
 
     #[test]
+    fn pad_display_keep_suffix_truncates_base_only_ascii() {
+        // 核心修复：base+suffix 超宽时只截 base，suffix（短 ASCII 坐标）整段保留在
+        // 结果末尾；两个仅 suffix 不同的长 base 必须渲染出不同结果，且都恰好落在
+        // 目标列宽——disambiguation 的存在意义（review 2026-07-12 修复项）。
+        let base = "pernsonal_tool_worktree-calm-ray-f3ck"; // 37 列，真实场景长度
+        let a = pad_display_keep_suffix(base, ":1.0", NAME_COL_WIDTH);
+        let b = pad_display_keep_suffix(base, ":12.3", NAME_COL_WIDTH);
+        assert_eq!(a.width(), NAME_COL_WIDTH, "a must land on exact width: {a:?}");
+        assert_eq!(b.width(), NAME_COL_WIDTH, "b must land on exact width: {b:?}");
+        assert_ne!(a, b, "different suffixes on the same long base must render differently");
+        assert!(a.trim_end().ends_with(":1.0"), "suffix must be visible at the end: {a:?}");
+        assert!(b.trim_end().ends_with(":12.3"), "suffix must be visible at the end: {b:?}");
+    }
+
+    #[test]
+    fn pad_display_keep_suffix_truncates_base_only_cjk() {
+        // 同一断言换成 >10 字 CJK 基名（22 列，同样超过 20 列列宽）——CJK 宽字符
+        // 在截断边界可能凑不满 base_budget（2 列字符切不开），最终必须靠补空格
+        // 兜到精确列宽，不能让 CJK 场景下总宽度悄悄短 1 列。
+        let base = "字".repeat(11);
+        let a = pad_display_keep_suffix(&base, ":1.0", NAME_COL_WIDTH);
+        let b = pad_display_keep_suffix(&base, ":2.0", NAME_COL_WIDTH);
+        assert_eq!(a.width(), NAME_COL_WIDTH, "a must land on exact width: {a:?}");
+        assert_eq!(b.width(), NAME_COL_WIDTH, "b must land on exact width: {b:?}");
+        assert_ne!(a, b, "different suffixes on the same long cjk base must render differently");
+        assert!(a.trim_end().ends_with(":1.0"), "suffix must be visible at the end: {a:?}");
+        assert!(b.trim_end().ends_with(":2.0"), "suffix must be visible at the end: {b:?}");
+    }
+
+    #[test]
+    fn pad_display_keep_suffix_short_name_unchanged_from_pad_display() {
+        // 短名字（合并后仍 ≤ 列宽）必须跟旧的 pad_display(&(base+suffix)) 行为等价
+        // ——这次重构不能改变既有短名字场景的输出（Feature 目标：向后兼容）。
+        let expected = pad_display("api:3.0", NAME_COL_WIDTH);
+        let actual = pad_display_keep_suffix("api", ":3.0", NAME_COL_WIDTH);
+        assert_eq!(actual, expected);
+        assert_eq!(actual.width(), NAME_COL_WIDTH);
+    }
+
+    #[test]
+    fn pad_display_keep_suffix_degenerates_when_suffix_alone_exceeds_width() {
+        // 防御性分支：suffix 自己就 ≥ width（正常不会发生——suffix 是短 ASCII 坐标，
+        // 但仍需兜底）——退化为对 suffix 本身 pad_display，绝不 panic/下溢
+        // （`width - suffix_w` 若不判断会在这里下溢）。
+        let out = pad_display_keep_suffix("base", ":123456789.999", 6);
+        assert_eq!(out, pad_display(":123456789.999", 6));
+        assert_eq!(out.width(), 6);
+    }
+
+    #[test]
     fn state_summaries() {
         let now = 21 * 60_000;
         let w = sess("%1", None, SessionState::WaitingInput { reason: "needs permission".into() }, 0);
@@ -716,6 +818,57 @@ mod tests {
         // 连 session_name 都没有 → 纯 "%id"。
         let s = sess("%12", None, SessionState::Working, 0);
         assert_eq!(display_name(&s), "%12");
+    }
+
+    #[test]
+    fn display_name_parts_splits_base_and_coordinate_suffix() {
+        // 坐标齐全 → (session_name, ":w.p")。截断只应该吃 base，suffix 整段保留
+        // 才是这个函数存在的意义（Feature 目标，review 2026-07-12 修复项）。
+        let mut s = sess("%3", Some("company"), SessionState::Working, 0);
+        s.window_index = Some(3);
+        s.pane_index = Some(0);
+        assert_eq!(display_name_parts(&s), ("company".to_string(), ":3.0".to_string()));
+    }
+
+    #[test]
+    fn display_name_parts_falls_back_to_name_and_pane_id_suffix() {
+        // 有名无坐标 → (name, " %id")。
+        let s = sess("%7", Some("api"), SessionState::Working, 0);
+        assert_eq!(display_name_parts(&s), ("api".to_string(), " %7".to_string()));
+    }
+
+    #[test]
+    fn display_name_parts_falls_back_to_pane_id_base_with_empty_suffix() {
+        // 无名 → (pane_id, "")。
+        let s = sess("%12", None, SessionState::Working, 0);
+        assert_eq!(display_name_parts(&s), ("%12".to_string(), String::new()));
+    }
+
+    #[test]
+    fn list_row_keeps_distinct_coordinate_suffix_for_long_ascii_names() {
+        // RED（review 2026-07-12）：用户真实 session 名常见 >20 列（如
+        // `pernsonal_tool_worktree-calm-ray-f3ck`，37 列）。list_row 对拼好的
+        // "name:w.p" 整串做 pad_display——truncate_display 从右边截断，两个仅
+        // 坐标不同的长名字的坐标后缀会被先吃掉，截断后可见前缀完全相同，
+        // disambiguation 功能名存实亡。构造两个共享同一个 37 列长基名、仅
+        // window/pane 不同的会话，断言列表行必须渲染成不同的字符串、且各自的
+        // 坐标后缀必须留在结果里。
+        let long_name = "pernsonal_tool_worktree-calm-ray-f3ck";
+        assert!(long_name.width() > NAME_COL_WIDTH, "fixture must exceed the name column width");
+        let mut a = sess("%1", Some(long_name), SessionState::Working, 0);
+        a.window_index = Some(1);
+        a.pane_index = Some(0);
+        let mut b = sess("%2", Some(long_name), SessionState::Working, 0);
+        b.window_index = Some(12);
+        b.pane_index = Some(3);
+        let row_a = list_row(&a, 0);
+        let row_b = list_row(&b, 0);
+        assert_ne!(
+            row_a, row_b,
+            "two long names differing only by coordinate suffix must render differently:\na={row_a:?}\nb={row_b:?}"
+        );
+        assert!(row_a.contains(":1.0"), "suffix must survive truncation: {row_a:?}");
+        assert!(row_b.contains(":12.3"), "suffix must survive truncation: {row_b:?}");
     }
 
     #[test]

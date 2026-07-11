@@ -24,7 +24,9 @@ after their next prompt, or restart them with `claude -c`.
 
 全屏 TUI：列表 + 详情两栏，↑↓/jk 选中，Enter 直接把你带到该 agent 的
 pane（只切窗口、绝不注入按键），q/Esc/Ctrl-C 退出。数据每 1s 从 daemon
-快照刷新；daemon 断连时显示「重连中…」，UI 永不冻结。
+快照刷新；Footer 显示「已连接·刚刚」/「已连接·Ns前」标注快照新鲜度（<2s
+内收到算「刚刚」，之后显示精确秒数），daemon 断连时显示「重连中…」，UI
+永不冻结。
 
 会话列显示精确坐标 `session:window.pane`（如 `company:3.0`），同一
 session 下多个 window/pane 各挂一个 agent 时也能一眼区分；坐标未知时回落
@@ -35,7 +37,7 @@ tmux.conf，请自行加入 `~/.tmux.conf`）：
 
     # popup（按需查看；需 tmux >= 3.2）：prefix+a 弹出
     bind a run-shell -b "tmux display-popup -c '#{client_tty}' -t '#{pane_id}' -e TFA_CLIENT='#{client_tty}' -E -w 90% -h 80% 'tfa tui'"
-    # 侧栏（任意 tmux 版本）：prefix+A 打开；--stay 让 Enter 跳转后侧栏常驻（跳转已发生，原窗口继续刷新）
+    # 侧栏（需 tmux >= 3.1）：prefix+A 打开；--stay 让 Enter 跳转后侧栏常驻（跳转已发生，原窗口继续刷新）
     bind A run-shell -b "tmux split-window -t '#{pane_id}' -h -l 40% -e TFA_CLIENT='#{client_tty}' 'tfa tui --stay'"
 
 display-popup/split-window 的 `-e` 不做 format 展开（tmux 3.7b 实测），所以

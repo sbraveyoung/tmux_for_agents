@@ -102,7 +102,7 @@ M4 曾用 LAN web/手机方案解决「同步看」，但用户决定弃用 web 
 
 **详情栏（选中项全指标）**：状态+时长、任务/waiting reason 全文、模型 + `context used/max (percent%)`、tokens 分项（in/out/cache_read/cache_creation/total）、cwd + git_branch + pid、agent + source、以及该 agent 对应 provider 的 quota（按 `AgentKind` 匹配：`observed_tokens_this_window`、`burn_rate_per_min`；本地估算 percent 恒缺省，显示 `≥` 前缀诚实标注，与 `tfa list` 一致）。
 
-**Footer**：键位提示 `↑↓ 选  ⏎ 跳转  q 退出` + `(1s 刷新)` + 连接态（断连时 `重连中…`）。
+**Footer**：键位提示 `↑↓ 选  ⏎ 跳转  q 退出` + `(1s 刷新)` + 连接态（断连时 `重连中…`）。已连接时额外显示快照新鲜度后缀 `已连接·刚刚` / `已连接·Ns前`（<2s 内收到的快照算「刚刚」，≥2s 起显示精确秒数，方便判断 daemon 是否卡住；断连态没有「新鲜」快照可言，不拼接后缀，`重连中…` 文案不变——2026-07-12 增补）。
 
 **外观（2026-07-11 用户验收决定，取代首版默认彩色）**：默认黑白（仅结构样式：waiting 行粗体、dead 行灰显、选中行反显），彩色经 config `[tui]` 开启（`color = true`），每状态可经 `state_colors` 按名覆盖内置调色板；详见 README「外观：`[tui]` 配置」。
 
@@ -118,6 +118,7 @@ M4 曾用 LAN web/手机方案解决「同步看」，但用户决定弃用 web 
    - README 键位在启动 tui 时注入发起者 tty：`run-shell -b "tmux display-popup -c '#{client_tty}' -t '#{pane_id}' -e TFA_CLIENT='#{client_tty}' -E -w 90% -h 80% 'tfa tui'"`（split 形态同理，见 §11）。
    - tui 内：`TFA_CLIENT` 存在 → 所有 `switch-client` 带 `-c "$TFA_CLIENT"`；缺失 → 降级为不带 `-c`（单 client 仍正常）。
    - **实测注记（2026-07-11）**：tmux 3.7b 上 `display-popup`/`split-window` 的 `-e VAR=value` **不做 format 展开**，`-e TFA_CLIENT="#{client_tty}"` 会把字面量 `#{client_tty}` 注入进来，导致 `switch-client -c` 必错。键位必须用 `run-shell` 包装，让 shell-command 里的 `#{client_tty}` 在按键时先展开成真实 tty 再注入。tfa 侧对注入值做 tty 形状检查（须以 `/` 开头），不合法一律视为未注入、降级为不带 `-c`。`-t '#{pane_id}'` 是必须的——run-shell 嵌套的 tmux 是无 `TMUX_PANE` 的新 CLI client，不显式 `-t` 会回落到「最近活跃 session」启发式。
+   - **`-c` 失败降级重试（2026-07-12 增补）**：`-c` 失败时降级重试一次不带 `-c`，缓解 --stay 长驻侧栏跨重连后 tty 失效——`--stay` 侧栏长驻期间发起 client 的 tty 可能因终端 detach/reattach 而失效，`TFA_CLIENT` 存的还是旧值，带 `-c` 必错；退化为不带 `-c` 让 tmux 隐式推断，单 client 场景下仍能跳对。
 2. **完整链一次性 chain**（`;` 作为独立 argv 元素传入，不走 shell、不需转义）：
    ```
    tmux <tmux_args()> switch-client [-c $TFA_CLIENT] -t <target> \; select-window -t <pane_id> \; select-pane -t <pane_id>
@@ -156,7 +157,7 @@ M4 曾用 LAN web/手机方案解决「同步看」，但用户决定弃用 web 
 - **CLI**：新增 `tfa tui`（无参）。可选 `tfa tui --print-keybindings` 打印下方推荐键位（便于用户自助配置 `TFA_CLIENT`）——可选、非必需任务。
 - **tfa 只做规矩的全屏 TUI 本体**，驻留形态由用户 tmux.conf 决定。README 给两套现成键位（含 `TFA_CLIENT` 注入，这是多 client 下跳对的**承重**配置）：
   - **popup（按需看，推荐）**：`bind a run-shell -b "tmux display-popup -c '#{client_tty}' -t '#{pane_id}' -e TFA_CLIENT='#{client_tty}' -E -w 90% -h 80% 'tfa tui'"`（`prefix+a` 弹出，`q`/Esc 关，Enter 跳转后自动关）。需 **tmux ≥ 3.2**（`display-popup` 最低版本）。
-  - **侧栏常驻（split）**：`bind A run-shell -b "tmux split-window -t '#{pane_id}' -h -l 40% -e TFA_CLIENT='#{client_tty}' 'tfa tui --stay'"`（任意 tmux 版本可用）。popup 跳转后退出不变；侧栏用 `--stay` 常驻（修订 2026-07-11：用户验收决定，取代原「一致退出」）。
+  - **侧栏常驻（split）**：`bind A run-shell -b "tmux split-window -t '#{pane_id}' -h -l 40% -e TFA_CLIENT='#{client_tty}' 'tfa tui --stay'"`（需 tmux >= 3.1）。popup 跳转后退出不变；侧栏用 `--stay` 常驻（修订 2026-07-11：用户验收决定，取代原「一致退出」）。
   - **实测注记（2026-07-11）**：两条键位均须 `run-shell` 包装——`-e` 值不做 format 展开，直接写 `-e TFA_CLIENT="#{client_tty}"` 会注入字面量导致跳转必错；`tfa` 对 `TFA_CLIENT` 做 tty 形状检查，不合法视为未注入。`-t '#{pane_id}'` 是必须的——run-shell 嵌套的 tmux 是无 `TMUX_PANE` 的新 CLI client，不显式 `-t` 会回落到「最近活跃 session」启发式。
 - tfa **不自动修改** `~/.tmux.conf`，只在 README 文档化。
 
