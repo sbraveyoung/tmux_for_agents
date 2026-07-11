@@ -63,8 +63,8 @@ pub fn spawn(
 /// 2. `list_procs` + `find_agent` per pane → `upsert_scanned` for hits.
 /// 3. Build the full `pane_id -> Option<pid>` liveness map → `reconcile_liveness`.
 /// 4. `stale_sweep`.
-/// 5. `session_name` backfill, reusing this round's pane table (no extra
-///    tmux call).
+/// 5. `session_name` + 坐标 (window/pane index) backfill, reusing this
+///    round's pane table (no extra tmux call).
 /// 6. Claude transcript metrics: discover + bind a transcript for panes that
 ///    don't have one yet, then read incremental updates for the rest.
 ///
@@ -128,16 +128,26 @@ pub fn tick(
     // —— state reconcile (single lock section) ——
     let mut st = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     for (pane, kind, pid) in &agent_hits {
-        st.upsert_scanned(&pane.pane_id, kind.clone(), *pid, &pane.cwd, &pane.session_name, now_ms);
+        st.upsert_scanned(&pane.pane_id, kind.clone(), *pid, pane.window_index, pane.pane_index, &pane.cwd, &pane.session_name, now_ms);
     }
     st.reconcile_liveness(&live, now_ms);
     st.stale_sweep(now_ms);
-    // session_name backfill, reusing this round's pane table.
-    let by_pane: HashMap<&str, &str> =
-        panes.iter().map(|p| (p.pane_id.as_str(), p.session_name.as_str())).collect();
+    // session_name + 坐标(window/pane index) backfill, reusing this round's pane
+    // table (no extra tmux call).
+    let by_pane: HashMap<&str, (&str, u32, u32)> = panes
+        .iter()
+        .map(|p| (p.pane_id.as_str(), (p.session_name.as_str(), p.window_index, p.pane_index)))
+        .collect();
     for pane_id in st.panes_needing_name() {
-        if let Some(name) = by_pane.get(pane_id.as_str()) {
+        if let Some((name, _, _)) = by_pane.get(pane_id.as_str()) {
             st.set_session_name(&pane_id, name.to_string());
+        }
+    }
+    // 坐标：覆盖本轮 pane 表里出现的每一条会话（含 hook-only、本轮未命中 agent
+    // 因而没走 upsert_scanned 的），每轮都跑一遍以便 move-pane/move-window 后自愈。
+    for s in st.sessions() {
+        if let Some((_, w, p)) = by_pane.get(s.pane_id.as_str()) {
+            st.set_location(&s.pane_id, *w, *p);
         }
     }
     // —— claude transcript metrics ——

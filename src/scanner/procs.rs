@@ -7,6 +7,8 @@ pub struct PaneInfo {
     pub pane_pid: u32,
     pub cwd: String,
     pub session_name: String,
+    pub window_index: u32,
+    pub pane_index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -19,12 +21,14 @@ pub struct ProcEntry {
 pub fn parse_panes(out: &str) -> Vec<PaneInfo> {
     out.lines()
         .filter_map(|line| {
-            let mut it = line.splitn(4, '\t');
+            let mut it = line.splitn(6, '\t');
             let pane_id = it.next()?.to_string();
             let pane_pid: u32 = it.next()?.parse().ok()?;
             let cwd = it.next()?.to_string();
             let session_name = it.next()?.to_string();
-            Some(PaneInfo { pane_id, pane_pid, cwd, session_name })
+            let window_index: u32 = it.next()?.parse().ok()?;
+            let pane_index: u32 = it.next()?.parse().ok()?;
+            Some(PaneInfo { pane_id, pane_pid, cwd, session_name, window_index, pane_index })
         })
         .collect()
 }
@@ -86,7 +90,7 @@ pub fn find_agent(pane_pid: u32, procs: &[ProcEntry]) -> Option<(AgentKind, u32)
 fn list_panes_with_args(extra: &[String]) -> Option<Vec<PaneInfo>> {
     let mut cmd = std::process::Command::new("tmux");
     cmd.args(extra);
-    cmd.args(["list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{session_name}"]);
+    cmd.args(["list-panes", "-a", "-F", "#{pane_id}\t#{pane_pid}\t#{pane_current_path}\t#{session_name}\t#{window_index}\t#{pane_index}"]);
     match cmd.output() {
         Ok(out) if out.status.success() => Some(parse_panes(&String::from_utf8_lossy(&out.stdout))),
         _ => None,
@@ -113,14 +117,26 @@ mod tests {
 
     #[test]
     fn parse_panes_splits_tab_fields() {
-        let out = "%1\t123\t/Users/u/proj\tcompany\n%22\t456\t/tmp/x y z\tLLM\n";
+        let out = "%1\t123\t/Users/u/proj\tcompany\t3\t0\n%22\t456\t/tmp/x y z\tLLM\t0\t2\n";
         let panes = parse_panes(out);
         assert_eq!(panes.len(), 2);
         assert_eq!(panes[0].pane_id, "%1");
         assert_eq!(panes[0].pane_pid, 123);
+        assert_eq!(panes[0].window_index, 3);
+        assert_eq!(panes[0].pane_index, 0);
         assert_eq!(panes[1].cwd, "/tmp/x y z");
         assert_eq!(panes[1].session_name, "LLM");
+        assert_eq!(panes[1].window_index, 0);
+        assert_eq!(panes[1].pane_index, 2);
         assert!(parse_panes("garbage without tabs\n").is_empty());
+    }
+
+    #[test]
+    fn parse_panes_skips_lines_missing_window_pane_index() {
+        // 老格式行（缺 window/pane_index 两列，如升级过渡期间的陈旧 tmux 输出
+        // 或截断行）视为畸形行，整行跳过而非 panic 或用 0 默认半解析。
+        let out = "%1\t123\t/Users/u/proj\tcompany\n";
+        assert!(parse_panes(out).is_empty());
     }
 
     #[test]

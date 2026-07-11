@@ -160,6 +160,7 @@ mod tests {
             state, state_since_ms: 0, current_task: None, cwd: None, last_activity_ms: 0,
             source: Source::Hook, pid: None, model: None, context: None, tokens: None,
             git_branch: None, transcript_path: None, agent_session_id: Some(key.into()), consumed_tokens: 0,
+            window_index: None, pane_index: None,
         }
     }
     #[allow(clippy::field_reassign_with_default)] // brief's exact test fixture shape

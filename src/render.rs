@@ -67,6 +67,8 @@ mod tests {
             transcript_path: None,
             agent_session_id: None,
             consumed_tokens: 0,
+            window_index: None,
+            pane_index: None,
         }
     }
 

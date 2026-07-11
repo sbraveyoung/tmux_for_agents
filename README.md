@@ -26,6 +26,10 @@ after their next prompt, or restart them with `claude -c`.
 pane（只切窗口、绝不注入按键），q/Esc/Ctrl-C 退出。数据每 1s 从 daemon
 快照刷新；daemon 断连时显示「重连中…」，UI 永不冻结。
 
+会话列显示精确坐标 `session:window.pane`（如 `company:3.0`），同一
+session 下多个 window/pane 各挂一个 agent 时也能一眼区分；坐标未知时回落
+`session %pane_id`（2026-07-12，用户验收增补）。
+
 推荐键位（`tfa tui --print-keybindings` 可再次打印；tfa 不会自动改你的
 tmux.conf，请自行加入 `~/.tmux.conf`）：
 

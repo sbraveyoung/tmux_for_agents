@@ -78,6 +78,10 @@ pub struct AgentSession {
     pub agent_session_id: Option<String>,
     #[serde(default)]
     pub consumed_tokens: u64,
+    #[serde(default)]
+    pub window_index: Option<u32>,
+    #[serde(default)]
+    pub pane_index: Option<u32>,
 }
 
 impl AgentSession {
@@ -111,6 +115,8 @@ fn fresh_session(pane_id: &str, agent: AgentKind, source: Source, at_ms: u64) ->
         transcript_path: None,
         agent_session_id: None,
         consumed_tokens: 0,
+        window_index: None,
+        pane_index: None,
     }
 }
 
@@ -163,7 +169,8 @@ impl StateStore {
         }
     }
 
-    pub fn upsert_scanned(&mut self, pane_id: &str, agent: AgentKind, pid: u32, cwd: &str, session_name: &str, now_ms: u64) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_scanned(&mut self, pane_id: &str, agent: AgentKind, pid: u32, window_index: u32, pane_index: u32, cwd: &str, session_name: &str, now_ms: u64) {
         // 漂移检查同 apply
         if let Some(existing) = self.sessions.get(pane_id) {
             if existing.agent != agent {
@@ -173,9 +180,22 @@ impl StateStore {
         let entry = self.sessions.entry(pane_id.to_string())
             .or_insert_with(|| fresh_session(pane_id, agent.clone(), Source::Scan, now_ms));
         entry.pid = Some(pid);
+        // 坐标无条件覆盖（不同于下面 cwd/session_name 的「仅补一次」）：pane 可能
+        // 被 move-pane/move-window，每轮扫描都要纠正成最新坐标，否则挪了窗口后
+        // UI 会一直显示陈旧坐标。
+        entry.window_index = Some(window_index);
+        entry.pane_index = Some(pane_index);
         if entry.cwd.is_none() { entry.cwd = Some(cwd.to_string()); }
         if entry.session_name.is_none() { entry.session_name = Some(session_name.to_string()); }
         if matches!(entry.source, Source::Hook) { entry.source = Source::Both; }
+    }
+
+    /// 位置随 move-pane/move-window 变化：有值且不同就更新（含从 None 补齐）。
+    pub fn set_location(&mut self, pane_id: &str, window_index: u32, pane_index: u32) {
+        if let Some(s) = self.sessions.get_mut(pane_id) {
+            s.window_index = Some(window_index);
+            s.pane_index = Some(pane_index);
+        }
     }
 
     pub fn reconcile_liveness(&mut self, live: &BTreeMap<String, Option<u32>>, now_ms: u64) {
@@ -414,6 +434,8 @@ mod tests {
             transcript_path: None,
             agent_session_id: None,
             consumed_tokens: 0,
+            window_index: None,
+            pane_index: None,
         };
         let json = serde_json::to_string(&sess).unwrap();
         assert!(json.contains(r#""state":"waiting_input""#), "json was: {json}");
@@ -429,6 +451,7 @@ mod tests {
         let s = &store.sessions()[0];
         assert!(matches!(s.source, Source::Hook)); // default
         assert!(s.model.is_none() && s.context.is_none() && s.tokens.is_none());
+        assert!(s.window_index.is_none() && s.pane_index.is_none(), "老快照没有坐标字段，必须缺省为 None");
     }
 
     #[test]
@@ -440,7 +463,7 @@ mod tests {
             git_branch: Some("main".into()),
         };
         let mut st = StateStore::new();
-        st.upsert_scanned("%9", AgentKind::Claude, 4242, "/tmp/p", "api", 1000);
+        st.upsert_scanned("%9", AgentKind::Claude, 4242, 0, 0, "/tmp/p", "api", 1000);
         st.set_metrics("%9", m, 1000);
         let json = serde_json::to_string(&st.sessions()[0]).unwrap();
         assert!(json.contains(r#""source":"scan""#), "json: {json}");
@@ -452,7 +475,7 @@ mod tests {
     #[test]
     fn scanned_pane_starts_working_and_hook_upgrades_source() {
         let mut st = StateStore::new();
-        st.upsert_scanned("%1", AgentKind::Claude, 42, "/tmp/p", "api", 1000);
+        st.upsert_scanned("%1", AgentKind::Claude, 42, 0, 0, "/tmp/p", "api", 1000);
         let s = &st.sessions()[0];
         assert!(matches!(s.state, SessionState::Working));
         assert!(matches!(s.source, Source::Scan));
@@ -468,11 +491,54 @@ mod tests {
     fn upsert_scanned_on_existing_entry_does_not_reset_state() {
         let mut st = StateStore::new();
         st.apply(ev(EventKind::Notification, 1000)); // WaitingInput via hook
-        st.upsert_scanned("%1", AgentKind::Claude, 42, "/tmp/p", "api", 2000);
+        st.upsert_scanned("%1", AgentKind::Claude, 42, 0, 0, "/tmp/p", "api", 2000);
         let s = &st.sessions()[0];
         assert!(matches!(s.state, SessionState::WaitingInput { .. }), "扫描确认不得覆盖事件状态");
         assert!(matches!(s.source, Source::Both));
         assert_eq!(s.pid, Some(42));
+    }
+
+    #[test]
+    fn upsert_scanned_sets_location() {
+        let mut st = StateStore::new();
+        st.upsert_scanned("%1", AgentKind::Claude, 42, 3, 0, "/tmp/p", "api", 1000);
+        let s = &st.sessions()[0];
+        assert_eq!(s.window_index, Some(3));
+        assert_eq!(s.pane_index, Some(0));
+    }
+
+    #[test]
+    fn upsert_scanned_overwrites_location_unconditionally() {
+        // pane 可能被 move-pane/move-window：不同于 cwd/session_name 的「仅补一次」
+        // 语义，坐标每轮都要覆盖成扫描到的最新值，否则挪了窗口 UI 还显示旧坐标。
+        let mut st = StateStore::new();
+        st.upsert_scanned("%1", AgentKind::Claude, 42, 3, 0, "/tmp/p", "api", 1000);
+        st.upsert_scanned("%1", AgentKind::Claude, 42, 5, 1, "/tmp/p", "api", 2000);
+        let s = &st.sessions()[0];
+        assert_eq!(s.window_index, Some(5), "move 之后必须纠正成最新坐标");
+        assert_eq!(s.pane_index, Some(1));
+    }
+
+    #[test]
+    fn set_location_fills_and_updates() {
+        let mut st = StateStore::new();
+        st.apply(ev(EventKind::SessionStart, 0)); // hook-only：还没有坐标
+        assert!(st.sessions()[0].window_index.is_none());
+        st.set_location("%1", 2, 1);
+        let s = &st.sessions()[0];
+        assert_eq!(s.window_index, Some(2));
+        assert_eq!(s.pane_index, Some(1));
+        st.set_location("%1", 4, 0); // pane 被 move
+        let s = &st.sessions()[0];
+        assert_eq!(s.window_index, Some(4));
+        assert_eq!(s.pane_index, Some(0));
+    }
+
+    #[test]
+    fn set_location_on_unknown_pane_is_noop() {
+        let mut st = StateStore::new();
+        st.set_location("%404", 1, 1); // 未知 pane：不得 panic、不得建档
+        assert!(st.sessions().is_empty());
     }
 
     #[test]
@@ -509,7 +575,7 @@ mod tests {
     fn reconcile_liveness_marks_dead() {
         let mut st = StateStore::new();
         st.apply(ev(EventKind::UserPromptSubmit, 1000));          // %1 working
-        st.upsert_scanned("%2", AgentKind::Claude, 7, "/p", "s", 1000);
+        st.upsert_scanned("%2", AgentKind::Claude, 7, 0, 0, "/p", "s", 1000);
         let mut live = std::collections::BTreeMap::new();
         live.insert("%2".to_string(), None::<u32>);               // pane 在、进程没了
         // %1 不在 map → pane 已消失
@@ -577,7 +643,7 @@ mod tests {
         // “文件赢事实”：transcript/db 里指标真的变了，就是活的证据，必须把
         // Stale 打回 Working，否则它 300s 后永久卡死在 Stale（F2）。
         let mut st = StateStore::new();
-        st.upsert_scanned("%1", AgentKind::Codex, 7, "/p", "s", 1000);
+        st.upsert_scanned("%1", AgentKind::Codex, 7, 0, 0, "/p", "s", 1000);
         st.stale_sweep(1000 + STALE_AFTER_MS + 1); // Stale
         st.set_metrics("%1", SessionMetrics {
             model: Some("gpt-5.3-codex".into()),
@@ -593,7 +659,7 @@ mod tests {
     #[test]
     fn identical_metrics_do_not_bump_activity() {
         let mut st = StateStore::new();
-        st.upsert_scanned("%1", AgentKind::Codex, 7, "/p", "s", 1000);
+        st.upsert_scanned("%1", AgentKind::Codex, 7, 0, 0, "/p", "s", 1000);
         let m = SessionMetrics {
             model: Some("gpt-5.3-codex".into()),
             tokens: Some(TokenTotals { total: 500, ..Default::default() }),
@@ -646,7 +712,7 @@ mod tests {
     fn panes_needing_name_lists_unnamed_only() {
         let mut st = StateStore::new();
         st.apply(ev(EventKind::SessionStart, 0));                       // %1 无名
-        st.upsert_scanned("%2", AgentKind::Claude, 7, "/p", "named", 0); // %2 有名
+        st.upsert_scanned("%2", AgentKind::Claude, 7, 0, 0, "/p", "named", 0); // %2 有名
         assert_eq!(st.panes_needing_name(), vec!["%1".to_string()]);
     }
 }

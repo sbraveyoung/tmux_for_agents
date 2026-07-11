@@ -98,6 +98,8 @@ M4 曾用 LAN web/手机方案解决「同步看」，但用户决定弃用 web 
 
 **列表行**：`<状态图标> <session_name 或 pane_id> <agent 图标> <model 短名> <ctx%> <状态摘要>`。状态摘要：waiting→`等 21m` + reason 截断；working→`current_task` 截断；done→`完成`；starting→`启动中`；stale→`失联`；dead→灰显 `已退出`。空态：model 空→`—`；context 空→`采集中`。
 
+**会话列坐标（2026-07-12，用户验收增补）**：同一 tmux session 的多个 window/pane 可以各挂一个 agent，仅显示 session_name 时同名行无法区分——会话列改为显示精确坐标 `session:window.pane`（如 `company:3.0`）；坐标未知时（hook 先到、scanner 还没跑到这一轮）回落 `session %pane_id`，session_name 也未知时进一步回落 `%pane_id`。
+
 **详情栏（选中项全指标）**：状态+时长、任务/waiting reason 全文、模型 + `context used/max (percent%)`、tokens 分项（in/out/cache_read/cache_creation/total）、cwd + git_branch + pid、agent + source、以及该 agent 对应 provider 的 quota（按 `AgentKind` 匹配：`observed_tokens_this_window`、`burn_rate_per_min`；本地估算 percent 恒缺省，显示 `≥` 前缀诚实标注，与 `tfa list` 一致）。
 
 **Footer**：键位提示 `↑↓ 选  ⏎ 跳转  q 退出` + `(1s 刷新)` + 连接态（断连时 `重连中…`）。

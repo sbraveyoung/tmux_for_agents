@@ -196,12 +196,17 @@ fn draw_detail(f: &mut Frame, area: Rect, model: &Model, styles: &StateStyles) {
         s.cwd.as_deref().unwrap_or("—"),
         s.git_branch.as_deref().unwrap_or("—")
     )));
+    let window = match (s.window_index, s.pane_index) {
+        (Some(w), Some(p)) => format!("{w}.{p}"),
+        _ => "—".into(),
+    };
     lines.push(Line::from(format!(
-        "agent: {} · 来源: {} · pid: {} · pane: {}",
+        "agent: {} · 来源: {} · pid: {} · pane: {} · 窗口: {}",
         s.agent.label(),
         source_label(s.source),
         s.pid.map(|p| p.to_string()).unwrap_or_else(|| "—".into()),
-        s.pane_id
+        s.pane_id,
+        window
     )));
     if let Some(q) = model.quota.iter().find(|q| q.provider == s.agent) {
         // 本地估算无真实 limit：observed 带 ≥ 前缀诚实标注，percent 恒缺省（与 tfa list 一致）
@@ -328,8 +333,22 @@ pub fn parse_color(name: &str) -> Option<Color> {
     }
 }
 
+/// 会话列标识：坐标齐全 → "name:w.p"；有名无坐标 → "name %id"；无名 → "%id"。
+/// 同一 tmux session 的多个 window/pane 可能各挂一个 agent——仅显示
+/// session_name 时同名行无法区分，精确坐标（如 `company:3.0`）才能定位到具体
+/// pane（Feature 目标，2026-07-12 用户验收增补）。
+pub fn display_name(s: &AgentSession) -> String {
+    match &s.session_name {
+        Some(name) => match (s.window_index, s.pane_index) {
+            (Some(w), Some(p)) => format!("{name}:{w}.{p}"),
+            _ => format!("{name} {}", s.pane_id), // hook 先到、scanner 还没跑到这一轮
+        },
+        None => s.pane_id.clone(),
+    }
+}
+
 pub fn list_row(s: &AgentSession, generated_at_ms: u64) -> String {
-    let name = s.session_name.as_deref().unwrap_or(&s.pane_id);
+    let name = display_name(s);
     let model = s.model.as_deref().map(model_short).unwrap_or_else(|| "—".into());
     let ctx = match &s.context {
         Some(c) => match c.percent {
@@ -341,7 +360,7 @@ pub fn list_row(s: &AgentSession, generated_at_ms: u64) -> String {
     format!(
         "{} {} {} {} {} {}",
         pad_display(state_icon(&s.state), ICON_COL_WIDTH),
-        pad_display(name, NAME_COL_WIDTH),
+        pad_display(&name, NAME_COL_WIDTH),
         pad_display(s.agent.label(), AGENT_COL_WIDTH),
         pad_display(&model, MODEL_COL_WIDTH),
         pad_display_right(&ctx, CTX_COL_WIDTH),
@@ -513,6 +532,8 @@ mod tests {
             transcript_path: None,
             agent_session_id: None,
             consumed_tokens: 12_345,
+            window_index: None,
+            pane_index: None,
         }
     }
 
@@ -674,6 +695,30 @@ mod tests {
     }
 
     #[test]
+    fn display_name_shows_coordinates_when_full() {
+        // 坐标齐全（session_name + window_index + pane_index 都有值）→ "name:w.p"，
+        // 同一 session 下多个 window/pane 各挂一个 agent 也能一眼区分（Feature 目标）。
+        let mut s = sess("%3", Some("company"), SessionState::Working, 0);
+        s.window_index = Some(3);
+        s.pane_index = Some(0);
+        assert_eq!(display_name(&s), "company:3.0");
+    }
+
+    #[test]
+    fn display_name_falls_back_to_name_and_pane_id_without_coordinates() {
+        // 有名无坐标（hook 先到、scanner 这一轮还没跑到）→ "name %id"。
+        let s = sess("%7", Some("api"), SessionState::Working, 0);
+        assert_eq!(display_name(&s), "api %7");
+    }
+
+    #[test]
+    fn display_name_falls_back_to_pane_id_when_unnamed() {
+        // 连 session_name 都没有 → 纯 "%id"。
+        let s = sess("%12", None, SessionState::Working, 0);
+        assert_eq!(display_name(&s), "%12");
+    }
+
+    #[test]
     fn parse_color_known_names_case_insensitive() {
         assert_eq!(parse_color("cyan"), Some(Color::Cyan));
         assert_eq!(parse_color("CYAN"), Some(Color::Cyan));
@@ -795,6 +840,22 @@ mod tests {
         assert!(text.contains("≥340k"), "quota observed with >= prefix:\n{text}");
         assert!(text.contains("q 退出"), "footer keys:\n{text}");
         assert!(text.contains("已连接"), "footer conn state:\n{text}");
+        // 坐标未知（本测试夹具没设 window_index/pane_index）→ 详情栏窗口字段回落 —。
+        assert!(text.contains("窗口: —"), "detail pane shows em-dash when coordinates unknown:\n{text}");
+    }
+
+    /// 会话:窗口.面板坐标（2026-07-12 用户验收增补）：同一 session 的多个
+    /// window/pane 各挂一个 agent 时，仅显示 session_name 无法区分同名行——列表
+    /// 会话列改显示精确坐标 `session:window.pane`；详情栏窗口字段同步显示。
+    #[test]
+    fn list_row_renders_session_window_pane_coordinates() {
+        let mut s = sess("%3", Some("company"), SessionState::Working, 0);
+        s.window_index = Some(3);
+        s.pane_index = Some(0);
+        let m = model_with(vec![s], vec![], 0);
+        let text = render_text(&m, &StateStyles::default(), 120, 30);
+        assert!(text.contains("company:3.0"), "list row must show session:window.pane coordinates:\n{text}");
+        assert!(text.contains("窗口: 3.0"), "detail pane must show window.pane when known:\n{text}");
     }
 
     /// Part1 用户验收：表头字段序列必须与 list_row 共用同一组列宽常量，否则两处
