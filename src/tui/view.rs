@@ -9,7 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const WIDE_MIN_WIDTH: u16 = 100;
 const MIN_DETAIL_WIDTH: u16 = 60;
@@ -212,15 +212,13 @@ pub fn list_row(s: &AgentSession, generated_at_ms: u64) -> String {
         },
         None => "采集中".into(),
     };
-    let ctx_width = ctx.width();
-    let ctx_col = if ctx_width < 4 { format!("{}{ctx}", " ".repeat(4 - ctx_width)) } else { ctx };
     format!(
         "{} {} {} {} {} {}",
         state_icon(&s.state),
         pad_display(name, 20),
         pad_display(s.agent.label(), 6),
         pad_display(&model, 14),
-        ctx_col,
+        pad_display_right(&ctx, 4),
         state_summary(s, generated_at_ms)
     )
 }
@@ -281,20 +279,53 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
     }
 }
 
-/// Pads `s` to `width` *display columns* (terminal cell width via
+/// Truncates `s` to at most `width` *display columns*, appending a 1-column
+/// … when anything was cut — the display-width analogue of `truncate_chars`.
+/// Char-count truncation is not enough for aligned columns: a CJK char is
+/// 1 char but 2 columns, so e.g. 15 个字 = 30 列 would sail through a
+/// 20-char check and blow the field.
+fn truncate_display(s: &str, width: usize) -> String {
+    if s.width() <= width {
+        return s.to_string();
+    }
+    let budget = width.saturating_sub(1); // 给 … 留 1 列
+    let mut used = 0usize;
+    let mut out = String::new();
+    for ch in s.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if used + cw > budget {
+            break;
+        }
+        used += cw;
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
+/// Pads `s` to exactly `width` *display columns* (terminal cell width via
 /// `unicode-width`), not char count — session names may be CJK, where one
-/// char occupies two columns and naive char-count padding under/over-shoots
-/// the column boundary. Truncates via `truncate_chars` first (existing …
-/// behavior, unchanged), then fills with spaces to reach the display width.
+/// char occupies two columns and naive char-count math under/over-shoots
+/// the column boundary in both directions. Truncates by display width
+/// (with …) when over budget, left-aligns with trailing spaces when under.
 pub fn pad_display(s: &str, width: usize) -> String {
-    let truncated = truncate_chars(s, width);
-    let dw = truncated.width();
+    let mut out = truncate_display(s, width);
+    let dw = out.width();
     if dw < width {
-        let mut out = truncated;
         out.push_str(&" ".repeat(width - dw));
-        out
+    }
+    out
+}
+
+/// Right-aligned sibling of `pad_display`: same display-width truncation,
+/// spaces go on the left (ctx% 列右对齐；采集中 占位符超宽同样被截到列宽内）。
+pub fn pad_display_right(s: &str, width: usize) -> String {
+    let out = truncate_display(s, width);
+    let dw = out.width();
+    if dw < width {
+        format!("{}{out}", " ".repeat(width - dw))
     } else {
-        truncated
+        out
     }
 }
 
@@ -411,6 +442,24 @@ mod tests {
         assert_eq!(ascii.width(), 20, "ascii pad target: {ascii:?}");
         assert_eq!(cjk.width(), 20, "cjk pad target: {cjk:?}");
         assert_eq!(ascii.width(), cjk.width());
+        // 截断同样必须按 display width：15 个 CJK 字 = 30 列，char-count 截断
+        // （≤20 字放行）会原样通过、炸破 20 列列宽；25 个 ASCII 截到 20 字 + …
+        // 也是 21 列。两类都必须收敛到恰好 20 列，且截断带 … 标记。
+        let cjk_long = pad_display(&"字".repeat(15), 20);
+        assert_eq!(cjk_long.width(), 20, "long cjk must be width-truncated: {cjk_long:?}");
+        let ascii_long = pad_display(&"a".repeat(25), 20);
+        assert_eq!(ascii_long.width(), 20, "long ascii must be width-truncated: {ascii_long:?}");
+        assert!(cjk_long.contains('…') && ascii_long.contains('…'), "truncation must be marked with …");
+    }
+
+    #[test]
+    fn pad_display_right_aligns_and_bounds_width() {
+        assert_eq!(pad_display_right("89%", 4), " 89%");
+        assert_eq!(pad_display_right("100%", 4), "100%");
+        // 超宽占位符（采集中 = 6 列）同样收敛到列宽内，右对齐
+        let placeholder = pad_display_right("采集中", 4);
+        assert_eq!(placeholder.width(), 4, "over-wide placeholder must be bounded: {placeholder:?}");
+        assert_eq!(placeholder, " 采…");
     }
 
     #[test]

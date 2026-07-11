@@ -85,6 +85,9 @@ fn event_loop(
                                 // 跳转已经发生，留在原 window 继续刷新，用户按 A 再关。
                                 Ok(()) => {
                                     if stay {
+                                        // 常驻后上一次失败的「该会话已结束」提示会残留
+                                        // 至下一次快照（≤1s）；成功跳转应立刻清掉。
+                                        model.nav_error = None;
                                         dirty = true;
                                     } else {
                                         return Ok(());
