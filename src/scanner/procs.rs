@@ -21,13 +21,20 @@ pub struct ProcEntry {
 pub fn parse_panes(out: &str) -> Vec<PaneInfo> {
     out.lines()
         .filter_map(|line| {
-            let mut it = line.splitn(6, '\t');
+            // 尾部两个数值列（window_index/pane_index）从右往左剥离：
+            // session_name 处于中间位置后，名字里若含字面 tab，从左 splitn 会
+            // 让字段整体右移、u32 解析失败、整行被丢——该 pane 从本轮 live 表
+            // 消失，reconcile_liveness 会把它的会话每轮误判 Dead。右剥离让
+            // session_name 恢复「实际上的最后一个变长字段」健壮性（splitn(4)
+            // 的最后一段吃掉剩余，与坐标列加入前的旧格式等价）。
+            let mut tail = line.rsplitn(3, '\t');
+            let pane_index: u32 = tail.next()?.parse().ok()?;
+            let window_index: u32 = tail.next()?.parse().ok()?;
+            let mut it = tail.next()?.splitn(4, '\t');
             let pane_id = it.next()?.to_string();
             let pane_pid: u32 = it.next()?.parse().ok()?;
             let cwd = it.next()?.to_string();
             let session_name = it.next()?.to_string();
-            let window_index: u32 = it.next()?.parse().ok()?;
-            let pane_index: u32 = it.next()?.parse().ok()?;
             Some(PaneInfo { pane_id, pane_pid, cwd, session_name, window_index, pane_index })
         })
         .collect()
@@ -137,6 +144,24 @@ mod tests {
         // 或截断行）视为畸形行，整行跳过而非 panic 或用 0 默认半解析。
         let out = "%1\t123\t/Users/u/proj\tcompany\n";
         assert!(parse_panes(out).is_empty());
+    }
+
+    #[test]
+    fn parse_panes_preserves_session_name_with_embedded_tab() {
+        // session_name 不再是行尾「吃掉剩余」的最后一列后，名字里一个字面 tab
+        // 会让从左 splitn 的字段整体右移、u32 解析失败、整行被丢——该 pane 从
+        // 本轮 live 表消失，reconcile_liveness 会把它的会话每轮误判 Dead。
+        // 尾部两个数值列必须从右往左剥离，session_name 恢复「实际上的最后一个
+        // 变长字段」健壮性（与坐标列加入前的旧格式等价）。
+        let out = "%1\t123\t/Users/u/proj\tmy\tname\t3\t0\n";
+        let panes = parse_panes(out);
+        assert_eq!(panes.len(), 1, "tab-in-name line must not be dropped");
+        assert_eq!(panes[0].pane_id, "%1");
+        assert_eq!(panes[0].pane_pid, 123);
+        assert_eq!(panes[0].cwd, "/Users/u/proj");
+        assert_eq!(panes[0].session_name, "my\tname", "name must be preserved whole");
+        assert_eq!(panes[0].window_index, 3);
+        assert_eq!(panes[0].pane_index, 0);
     }
 
     #[test]

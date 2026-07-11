@@ -212,6 +212,15 @@ fn scanner_backfills_preexisting_agent_and_marks_dead() {
     let real_cwd = String::from_utf8(real_cwd_out.stdout).unwrap().trim().to_string();
     assert!(!real_cwd.is_empty(), "failed to read pane_current_path");
 
+    // 期望坐标同样以 tmux 自己报告的为准（不硬编码 1/0——window/pane 编号受
+    // base-index 等配置影响，发现方式与上面 real_cwd 一致）：验证坐标真的走通
+    // 了 tmux list-panes → tick() upsert_scanned → snapshot JSON 全链路。
+    let coord_out = env.tmux(&["display-message", "-p", "-t", "main:1", "#{window_index} #{pane_index}"]);
+    let coord_str = String::from_utf8(coord_out.stdout).unwrap().trim().to_string();
+    let mut coord_it = coord_str.split_whitespace();
+    let expect_w: u64 = coord_it.next().expect("window_index missing").parse().expect("window_index not a number");
+    let expect_p: u64 = coord_it.next().expect("pane_index missing").parse().expect("pane_index not a number");
+
     let proj_dir = env.projects_dir.join(encode_cwd(&real_cwd));
     std::fs::create_dir_all(&proj_dir).unwrap();
     std::fs::write(proj_dir.join("s1.jsonl"), format!("{REAL_ASSISTANT_LINE}\n")).unwrap();
@@ -231,6 +240,8 @@ fn scanner_backfills_preexisting_agent_and_marks_dead() {
                         && s["state"] == "working"
                         && s["model"] == "claude-fable-5"
                         && s["context"]["percent"] == 98
+                        && s["window_index"] == expect_w
+                        && s["pane_index"] == expect_p
                 })
             })
         },
