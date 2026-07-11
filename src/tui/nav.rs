@@ -3,6 +3,14 @@
 
 use std::process::{Command, Stdio};
 
+/// TFA_CLIENT 健全性检查：只接受形如 tty 路径（以 '/' 开头）的值。
+/// tmux 3.7b 的 display-popup/split-window `-e` 不做 format 展开——配错的
+/// 键位会把字面量 "#{client_tty}" 注入进来；无条件透传给 switch-client -c
+/// 会让每次跳转必然失败。不像 tty 就当没注入：降级为不带 -c（单 client 正确）。
+pub fn sanitize_client(raw: Option<String>) -> Option<String> {
+    raw.filter(|s| s.starts_with('/'))
+}
+
 /// 构造跳转 argv（纯函数，可单测）。`;` 作为独立 argv 元素传给 tmux，
 /// 不经 shell、无转义问题。完整链一次性 chain：switch-client →
 /// select-window → select-pane —— select-pane 不会自动激活所在 window，
@@ -78,5 +86,13 @@ mod tests {
         let v = nav_argv(&["-L".into(), "testsock".into()], None, "%1");
         assert_eq!(&v[..3], &["tmux".to_string(), "-L".into(), "testsock".into()]);
         assert_eq!(v[3], "switch-client");
+    }
+
+    #[test]
+    fn sanitize_client_accepts_tty_paths_rejects_garbage() {
+        assert_eq!(sanitize_client(Some("/dev/ttys015".into())), Some("/dev/ttys015".to_string()));
+        assert_eq!(sanitize_client(Some("#{client_tty}".into())), None, "未展开的 format 字面量必须被拒");
+        assert_eq!(sanitize_client(Some("".into())), None);
+        assert_eq!(sanitize_client(None), None);
     }
 }

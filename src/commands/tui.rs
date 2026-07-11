@@ -16,10 +16,12 @@ const EVENT_POLL: Duration = Duration::from_millis(150);
 
 /// README 同步维护同样两条（Task 6）；TFA_CLIENT 注入是多 client 下跳对的承重配置。
 const KEYBINDINGS: &str = r##"# ~/.tmux.conf — tfa tui 推荐键位
+# 注意：display-popup/split-window 的 -e 不做 format 展开（tmux 3.7b 实测），
+# 必须用 run-shell 包装，让 #{client_tty} 在按键时先展开成真实 tty 再注入。
 # popup（按需查看；需 tmux >= 3.2）：prefix+a 弹出，q/Esc 关闭，Enter 跳转后自动关闭
-bind a display-popup -E -w 90% -h 80% -e TFA_CLIENT="#{client_tty}" "tfa tui"
+bind a run-shell -b "tmux display-popup -c '#{client_tty}' -e TFA_CLIENT='#{client_tty}' -E -w 90% -h 80% 'tfa tui'"
 # 侧栏（任意 tmux 版本）：prefix+A 打开；Enter 跳转后侧栏关闭
-bind A split-window -h -l 40% -e TFA_CLIENT="#{client_tty}" "tfa tui"
+bind A run-shell -b "tmux split-window -h -l 40% -e TFA_CLIENT='#{client_tty}' 'tfa tui'"
 "##;
 
 pub fn run(print_keybindings: bool) {
@@ -29,7 +31,7 @@ pub fn run(print_keybindings: bool) {
     }
     spawn_signal_guard();
     let in_tmux = std::env::var_os("TMUX").is_some();
-    let tfa_client = std::env::var("TFA_CLIENT").ok().filter(|s| !s.is_empty());
+    let tfa_client = crate::tui::nav::sanitize_client(std::env::var("TFA_CLIENT").ok());
     let (tx, rx) = mpsc::channel();
     poll::spawn(tx);
     let mut model = Model::new(in_tmux);
