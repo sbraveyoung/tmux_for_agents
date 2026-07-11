@@ -31,19 +31,29 @@ tmux.conf，请自行加入 `~/.tmux.conf`）：
 
     # popup（按需查看；需 tmux >= 3.2）：prefix+a 弹出
     bind a run-shell -b "tmux display-popup -c '#{client_tty}' -t '#{pane_id}' -e TFA_CLIENT='#{client_tty}' -E -w 90% -h 80% 'tfa tui'"
-    # 侧栏（任意 tmux 版本）：prefix+A 打开；Enter 跳转后侧栏关闭
-    bind A run-shell -b "tmux split-window -t '#{pane_id}' -h -l 40% -e TFA_CLIENT='#{client_tty}' 'tfa tui'"
+    # 侧栏（任意 tmux 版本）：prefix+A 打开；--stay 让 Enter 跳转后侧栏常驻（跳转已发生，原窗口继续刷新）
+    bind A run-shell -b "tmux split-window -t '#{pane_id}' -h -l 40% -e TFA_CLIENT='#{client_tty}' 'tfa tui --stay'"
 
 display-popup/split-window 的 `-e` 不做 format 展开（tmux 3.7b 实测），所以
 必须经 `run-shell` 让 `#{client_tty}` 先展开；`tfa` 侧对 `TFA_CLIENT` 也做
-健全性检查，配错时自动降级为单 client 模式。
+健全性检查，配错时自动降级为单 client 模式。`-t '#{pane_id}'` 同样是必须
+的——run-shell 里的 tmux 是无 `TMUX_PANE` 的新 CLI client，不显式 `-t` 会
+回落到「最近活跃 session」启发式，可能挂错窗口。
 
 `TFA_CLIENT='#{client_tty}'` 是多 client 场景（多个终端窗口 attach 同一
 tmux server）下 Enter 跳转能切对 client 的承重配置——popup/split 子进程
 本身不是 tmux client，不注入则退化为 tmux 隐式推断，可能切错。
 
-已知限制：嵌套 tmux（SSH 远端再开 tmux）下不保证跳转正确；非 tmux 环境
-里 Enter 禁用并提示。
+已知行为：
+
+- 嵌套 tmux（SSH 远端再开 tmux）下不保证跳转正确；非 tmux 环境里 Enter
+  禁用并提示。
+- 多个 client attach **同一** session 时，Enter 跳转会联动所有这些
+  client（tmux 会话模型：一个 session 只有一个当前 window，不是 client
+  私有的）——要独立观察不同 agent，请让每个 client attach 不同 session。
+- 死亡 agent 的 pane 若仍存在，Enter 仍会跳转过去（导航目标是 pane 不是
+  进程，方便看现场输出或重启）；pane 本身消失才会报「该会话已结束，
+  刷新中…」。
 
 ## Environment variables
 

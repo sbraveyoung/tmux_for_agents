@@ -113,7 +113,7 @@ M4 曾用 LAN web/手机方案解决「同步看」，但用户决定弃用 web 
 1. **显式注入发起 client，不靠 tmux 隐式推断**。多个 client attach 同一 session 时（可观测性场景常见：开两个终端窗口分别盯不同 agent），`switch-client` 不带 `-c` 会依赖 tmux 内部「当前 client」推断，从 popup/split 子进程（其本身**不是** tmux client）发起时可能切错 client 或报 `no current client`。
    - README 键位在启动 tui 时注入发起者 tty：`run-shell -b "tmux display-popup -c '#{client_tty}' -t '#{pane_id}' -e TFA_CLIENT='#{client_tty}' -E -w 90% -h 80% 'tfa tui'"`（split 形态同理，见 §11）。
    - tui 内：`TFA_CLIENT` 存在 → 所有 `switch-client` 带 `-c "$TFA_CLIENT"`；缺失 → 降级为不带 `-c`（单 client 仍正常）。
-   - **实测注记（2026-07-11）**：tmux 3.7b 上 `display-popup`/`split-window` 的 `-e VAR=value` **不做 format 展开**，`-e TFA_CLIENT="#{client_tty}"` 会把字面量 `#{client_tty}` 注入进来，导致 `switch-client -c` 必错。键位必须用 `run-shell` 包装，让 shell-command 里的 `#{client_tty}` 在按键时先展开成真实 tty 再注入。tfa 侧对注入值做 tty 形状检查（须以 `/` 开头），不合法一律视为未注入、降级为不带 `-c`。
+   - **实测注记（2026-07-11）**：tmux 3.7b 上 `display-popup`/`split-window` 的 `-e VAR=value` **不做 format 展开**，`-e TFA_CLIENT="#{client_tty}"` 会把字面量 `#{client_tty}` 注入进来，导致 `switch-client -c` 必错。键位必须用 `run-shell` 包装，让 shell-command 里的 `#{client_tty}` 在按键时先展开成真实 tty 再注入。tfa 侧对注入值做 tty 形状检查（须以 `/` 开头），不合法一律视为未注入、降级为不带 `-c`。`-t '#{pane_id}'` 是必须的——run-shell 嵌套的 tmux 是无 `TMUX_PANE` 的新 CLI client，不显式 `-t` 会回落到「最近活跃 session」启发式。
 2. **完整链一次性 chain**（`;` 作为独立 argv 元素传入，不走 shell、不需转义）：
    ```
    tmux <tmux_args()> switch-client [-c $TFA_CLIENT] -t <target> \; select-window -t <pane_id> \; select-pane -t <pane_id>
@@ -152,8 +152,8 @@ M4 曾用 LAN web/手机方案解决「同步看」，但用户决定弃用 web 
 - **CLI**：新增 `tfa tui`（无参）。可选 `tfa tui --print-keybindings` 打印下方推荐键位（便于用户自助配置 `TFA_CLIENT`）——可选、非必需任务。
 - **tfa 只做规矩的全屏 TUI 本体**，驻留形态由用户 tmux.conf 决定。README 给两套现成键位（含 `TFA_CLIENT` 注入，这是多 client 下跳对的**承重**配置）：
   - **popup（按需看，推荐）**：`bind a run-shell -b "tmux display-popup -c '#{client_tty}' -t '#{pane_id}' -e TFA_CLIENT='#{client_tty}' -E -w 90% -h 80% 'tfa tui'"`（`prefix+a` 弹出，`q`/Esc 关，Enter 跳转后自动关）。需 **tmux ≥ 3.2**（`display-popup` 最低版本）。
-  - **侧栏常驻（split）**：`bind A run-shell -b "tmux split-window -t '#{pane_id}' -h -l 40% -e TFA_CLIENT='#{client_tty}' 'tfa tui'"`（任意 tmux 版本可用）。split 形态下 Enter 跳转后 tui 是否退出（关掉侧栏）by design 选**退出**（与 popup 一致，语义简单）；用户要常驻可重新开。
-  - **实测注记（2026-07-11）**：两条键位均须 `run-shell` 包装——`-e` 值不做 format 展开，直接写 `-e TFA_CLIENT="#{client_tty}"` 会注入字面量导致跳转必错；`tfa` 对 `TFA_CLIENT` 做 tty 形状检查，不合法视为未注入。
+  - **侧栏常驻（split）**：`bind A run-shell -b "tmux split-window -t '#{pane_id}' -h -l 40% -e TFA_CLIENT='#{client_tty}' 'tfa tui --stay'"`（任意 tmux 版本可用）。popup 跳转后退出不变；侧栏用 `--stay` 常驻（修订 2026-07-11：用户验收决定，取代原「一致退出」）。
+  - **实测注记（2026-07-11）**：两条键位均须 `run-shell` 包装——`-e` 值不做 format 展开，直接写 `-e TFA_CLIENT="#{client_tty}"` 会注入字面量导致跳转必错；`tfa` 对 `TFA_CLIENT` 做 tty 形状检查，不合法视为未注入。`-t '#{pane_id}'` 是必须的——run-shell 嵌套的 tmux 是无 `TMUX_PANE` 的新 CLI client，不显式 `-t` 会回落到「最近活跃 session」启发式。
 - tfa **不自动修改** `~/.tmux.conf`，只在 README 文档化。
 
 ## 12. 错误处理与生命周期
@@ -199,4 +199,6 @@ M4 曾用 LAN web/手机方案解决「同步看」，但用户决定弃用 web 
 - **多 client 且未配 `TFA_CLIENT`**：降级为默认推断，可能切错 client——README 强调配 `TFA_CLIENT` 的键位。
 - **多实例并发**（同时开 popup + split）：各自独立每秒轮询、各自独立操作，良性竞态（后写者赢），无需加锁协调。
 - **§7.2 的 tmux 目标解析语义**跨版本差异：必须在 plan/实现期真机手验后固化 argv，不信任设计期结论直接实现。
+- **多 client attach 同一 session（已知行为，2026-07-11）**：Enter 的 `select-window` 会联动所有 attach 该 session 的 client（tmux 会话模型：一个 session 只有一个「当前 window」，非 client 私有）——要独立观察不同 agent，请让每个 client attach 不同的 session。
+- **死亡 agent 的 pane 跳转（已知行为，2026-07-11）**：只要 pane 还存在，Enter 仍会跳转到 Dead 状态的 agent（导航目标是 pane 而非进程，便于查看现场输出或重启）；只有 pane 本身也消失时才会报「该会话已结束，刷新中…」。
 - ratatui 0.30 是较新的模块化重构版（0.29→0.30 拆分了 crates），实现期注意 API 以 0.30 为准，勿照抄 0.29 教程。

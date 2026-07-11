@@ -31,5 +31,10 @@ fn tui_print_keybindings_outputs_both_bindings() {
     assert!(out.contains("split-window"), "split binding missing: {out}");
     assert!(out.contains(r##"TFA_CLIENT='#{client_tty}'"##), "TFA_CLIENT injection missing: {out}");
     assert!(out.contains("run-shell"), "run-shell wrapping missing: {out}");
-    assert!(out.contains(r##"-t '#{pane_id}'"##), "explicit -t pane target missing: {out}");
+    assert_eq!(
+        out.matches(r##"-t '#{pane_id}'"##).count(),
+        2,
+        "-t pane target must be pinned exactly twice (popup + split): {out}"
+    );
+    assert!(out.contains("--stay"), "sidebar --stay flag missing: {out}");
 }

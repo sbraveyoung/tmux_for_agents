@@ -53,6 +53,9 @@ enum Command {
         /// Print recommended tmux keybindings and exit
         #[arg(long)]
         print_keybindings: bool,
+        /// Keep the TUI open after a successful Enter jump (sidebar mode)
+        #[arg(long)]
+        stay: bool,
     },
 }
 
@@ -75,6 +78,6 @@ fn main() {
             _ => println!("{{\"sessions\":[],\"quota\":[]}}"),
         },
         Command::Notify { action } => commands::notify::run(&action),
-        Command::Tui { print_keybindings } => commands::tui::run(print_keybindings),
+        Command::Tui { print_keybindings, stay } => commands::tui::run(print_keybindings, stay),
     }
 }

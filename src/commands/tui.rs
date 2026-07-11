@@ -20,11 +20,11 @@ const KEYBINDINGS: &str = r##"# ~/.tmux.conf — tfa tui 推荐键位
 # 必须用 run-shell 包装，让 #{client_tty} 在按键时先展开成真实 tty 再注入。
 # popup（按需查看；需 tmux >= 3.2）：prefix+a 弹出，q/Esc 关闭，Enter 跳转后自动关闭
 bind a run-shell -b "tmux display-popup -c '#{client_tty}' -t '#{pane_id}' -e TFA_CLIENT='#{client_tty}' -E -w 90% -h 80% 'tfa tui'"
-# 侧栏（任意 tmux 版本）：prefix+A 打开；Enter 跳转后侧栏关闭
-bind A run-shell -b "tmux split-window -t '#{pane_id}' -h -l 40% -e TFA_CLIENT='#{client_tty}' 'tfa tui'"
+# 侧栏（任意 tmux 版本）：prefix+A 打开；--stay 让 Enter 跳转后侧栏常驻（跳转已发生，原窗口继续刷新）
+bind A run-shell -b "tmux split-window -t '#{pane_id}' -h -l 40% -e TFA_CLIENT='#{client_tty}' 'tfa tui --stay'"
 "##;
 
-pub fn run(print_keybindings: bool) {
+pub fn run(print_keybindings: bool, stay: bool) {
     if print_keybindings {
         print!("{KEYBINDINGS}");
         return;
@@ -36,7 +36,7 @@ pub fn run(print_keybindings: bool) {
     poll::spawn(tx);
     let mut model = Model::new(in_tmux);
     let mut terminal = ratatui::init();
-    let res = event_loop(&mut terminal, &mut model, &rx, tfa_client.as_deref());
+    let res = event_loop(&mut terminal, &mut model, &rx, tfa_client.as_deref(), stay);
     ratatui::restore();
     if let Err(e) = res {
         eprintln!("tfa tui: {e}");
@@ -64,6 +64,7 @@ fn event_loop(
     model: &mut Model,
     rx: &mpsc::Receiver<PollMsg>,
     tfa_client: Option<&str>,
+    stay: bool,
 ) -> anyhow::Result<()> {
     let mut dirty = true;
     loop {
@@ -79,9 +80,16 @@ fn event_loop(
                         Action::Redraw => dirty = true,
                         Action::Navigate(pane_id) => {
                             match crate::tui::nav::navigate(&pane_id, tfa_client) {
-                                // 跳转成功 → 主动退出进程（popup 的 -E 不因
-                                // switch-client 自动关闭，必须自己退，spec §7.3）
-                                Ok(()) => return Ok(()),
+                                // 跳转成功：popup 必须主动退出（-E 不因 switch-client
+                                // 自动关闭，spec §7.3）；--stay（侧栏模式）则不退出——
+                                // 跳转已经发生，留在原 window 继续刷新，用户按 A 再关。
+                                Ok(()) => {
+                                    if stay {
+                                        dirty = true;
+                                    } else {
+                                        return Ok(());
+                                    }
+                                }
                                 Err(_) => {
                                     model.nav_error = Some("该会话已结束，刷新中…".into());
                                     dirty = true;

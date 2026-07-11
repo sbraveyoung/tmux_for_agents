@@ -9,6 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 
 const WIDE_MIN_WIDTH: u16 = 100;
 const MIN_DETAIL_WIDTH: u16 = 60;
@@ -55,11 +56,27 @@ fn header_line(model: &Model) -> Line<'static> {
             SessionState::Stale => {}
         }
     }
-    let mut text = format!(" tfa  ⚡{working} ⏸{waiting} ✓{done} 💀{dead}");
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    // 四段计数按状态色着色，与列表行/详情首行同色（state_style）；" tfa " 标题与
+    // 分隔空格保留原有 BOLD，burn 文本保持默认样式不着色（spec 要求）。
+    let mut spans = vec![
+        Span::styled(" tfa  ", bold),
+        Span::styled(format!("⚡{working}"), Style::default().fg(Color::Green)),
+        Span::styled(" ", bold),
+        Span::styled(format!("⏸{waiting}"), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(" ", bold),
+        Span::styled(format!("✓{done}"), Style::default().fg(Color::Cyan)),
+        Span::styled(" ", bold),
+        Span::styled(format!("💀{dead}"), Style::default().fg(Color::DarkGray)),
+    ];
+    let mut burn = String::new();
     for q in &model.quota {
-        text.push_str(&format!("  ·  {} {:.0} tok/min", q.provider.label(), q.burn_rate_per_min));
+        burn.push_str(&format!("  ·  {} {:.0} tok/min", q.provider.label(), q.burn_rate_per_min));
     }
-    Line::from(Span::styled(text, Style::default().add_modifier(Modifier::BOLD)))
+    if !burn.is_empty() {
+        spans.push(Span::raw(burn));
+    }
+    Line::from(spans)
 }
 
 fn footer_line(model: &Model) -> Line<'static> {
@@ -82,14 +99,7 @@ fn draw_list(f: &mut Frame, area: Rect, model: &Model) {
     let items: Vec<ListItem> = model
         .sessions
         .iter()
-        .map(|s| {
-            let style = if matches!(s.state, SessionState::Dead) {
-                Style::default().fg(Color::DarkGray) // dead 行灰显（spec §6）
-            } else {
-                Style::default()
-            };
-            ListItem::new(list_row(s, model.generated_at_ms)).style(style)
-        })
+        .map(|s| ListItem::new(list_row(s, model.generated_at_ms)).style(state_style(&s.state)))
         .collect();
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title("会话"))
@@ -108,7 +118,10 @@ fn draw_detail(f: &mut Frame, area: Rect, model: &Model) {
     };
     let dur = fmt_duration(model.generated_at_ms.saturating_sub(s.state_since_ms));
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(format!("{} {}  已持续 {dur}", state_icon(&s.state), state_name(&s.state))));
+    lines.push(Line::from(Span::styled(
+        format!("{} {}  已持续 {dur}", state_icon(&s.state), state_name(&s.state)),
+        state_style(&s.state),
+    )));
     if let SessionState::WaitingInput { reason } = &s.state {
         lines.push(Line::from(format!("等待原因: {reason}")));
     } else if let Some(t) = &s.current_task {
@@ -175,6 +188,20 @@ pub fn state_name(s: &SessionState) -> &'static str {
     }
 }
 
+/// 按状态紧急度着色（列表行 + 详情首行共用，spec 要求同色）：
+/// WaitingInput → 黄+粗体（最紧急，需要用户回应）；Working → 绿；Starting →
+/// 默认；Done → 青；Stale → 洋红；Dead → 灰（沿用既有灰显）。
+pub fn state_style(s: &SessionState) -> Style {
+    match s {
+        SessionState::WaitingInput { .. } => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        SessionState::Working => Style::default().fg(Color::Green),
+        SessionState::Starting => Style::default(),
+        SessionState::Done => Style::default().fg(Color::Cyan),
+        SessionState::Stale => Style::default().fg(Color::Magenta),
+        SessionState::Dead => Style::default().fg(Color::DarkGray),
+    }
+}
+
 pub fn list_row(s: &AgentSession, generated_at_ms: u64) -> String {
     let name = s.session_name.as_deref().unwrap_or(&s.pane_id);
     let model = s.model.as_deref().map(model_short).unwrap_or_else(|| "—".into());
@@ -185,13 +212,15 @@ pub fn list_row(s: &AgentSession, generated_at_ms: u64) -> String {
         },
         None => "采集中".into(),
     };
+    let ctx_width = ctx.width();
+    let ctx_col = if ctx_width < 4 { format!("{}{ctx}", " ".repeat(4 - ctx_width)) } else { ctx };
     format!(
-        "{} {} · {} · {} · {} · {}",
+        "{} {} {} {} {} {}",
         state_icon(&s.state),
-        truncate_chars(name, 20),
-        s.agent.label(),
-        model,
-        ctx,
+        pad_display(name, 20),
+        pad_display(s.agent.label(), 6),
+        pad_display(&model, 14),
+        ctx_col,
         state_summary(s, generated_at_ms)
     )
 }
@@ -252,6 +281,23 @@ pub fn truncate_chars(s: &str, max: usize) -> String {
     }
 }
 
+/// Pads `s` to `width` *display columns* (terminal cell width via
+/// `unicode-width`), not char count — session names may be CJK, where one
+/// char occupies two columns and naive char-count padding under/over-shoots
+/// the column boundary. Truncates via `truncate_chars` first (existing …
+/// behavior, unchanged), then fills with spaces to reach the display width.
+pub fn pad_display(s: &str, width: usize) -> String {
+    let truncated = truncate_chars(s, width);
+    let dw = truncated.width();
+    if dw < width {
+        let mut out = truncated;
+        out.push_str(&" ".repeat(width - dw));
+        out
+    } else {
+        truncated
+    }
+}
+
 pub fn source_label(s: Source) -> &'static str {
     match s {
         Source::Hook => "hook",
@@ -270,7 +316,6 @@ mod tests {
     use crate::tui::poll::PollMsg;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
-    use unicode_width::UnicodeWidthStr;
 
     fn sess(pane: &str, name: Option<&str>, state: SessionState, since: u64) -> AgentSession {
         AgentSession {
@@ -354,6 +399,18 @@ mod tests {
         assert_eq!(model_short("gpt-5.3-codex"), "gpt-5.3-codex");
         assert_eq!(truncate_chars("字".repeat(30).as_str(), 10).chars().count(), 11); // 10 + …
         assert_eq!(source_label(Source::Both), "hook+scan");
+    }
+
+    #[test]
+    fn pad_display_pads_by_display_width_not_char_count() {
+        // CJK 名字（"会话室" 3 字 = 6 列）与 ASCII 名字（"api" 3 字 = 3 列）填到
+        // 同一 display width：若按 char count 填充（如 format!("{:<20}")），CJK
+        // 会因为「3 字」被当成只占 3 列而多填 3 个空格，超出列宽 3 列。
+        let ascii = pad_display("api", 20);
+        let cjk = pad_display("会话室", 20);
+        assert_eq!(ascii.width(), 20, "ascii pad target: {ascii:?}");
+        assert_eq!(cjk.width(), 20, "cjk pad target: {cjk:?}");
+        assert_eq!(ascii.width(), cjk.width());
     }
 
     #[test]
