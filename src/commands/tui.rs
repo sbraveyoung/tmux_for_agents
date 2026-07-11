@@ -32,11 +32,14 @@ pub fn run(print_keybindings: bool, stay: bool) {
     spawn_signal_guard();
     let in_tmux = std::env::var_os("TMUX").is_some();
     let tfa_client = crate::tui::nav::sanitize_client(std::env::var("TFA_CLIENT").ok());
+    // 复用 daemon 同一条 config 加载路径（缺文件/坏 TOML → 默认，绝不硬失败）；
+    // 只在启动时读一次，[tui] 颜色配置在运行期不热重载（Part2c 用户验收）。
+    let styles = view::resolve_state_styles(&crate::config::Config::load().tui);
     let (tx, rx) = mpsc::channel();
     poll::spawn(tx);
     let mut model = Model::new(in_tmux);
     let mut terminal = ratatui::init();
-    let res = event_loop(&mut terminal, &mut model, &rx, tfa_client.as_deref(), stay);
+    let res = event_loop(&mut terminal, &mut model, &rx, tfa_client.as_deref(), stay, &styles);
     ratatui::restore();
     if let Err(e) = res {
         eprintln!("tfa tui: {e}");
@@ -65,11 +68,12 @@ fn event_loop(
     rx: &mpsc::Receiver<PollMsg>,
     tfa_client: Option<&str>,
     stay: bool,
+    styles: &view::StateStyles,
 ) -> anyhow::Result<()> {
     let mut dirty = true;
     loop {
         if dirty {
-            terminal.draw(|f| view::draw(f, model))?;
+            terminal.draw(|f| view::draw(f, model, styles))?;
             dirty = false;
         }
         if event::poll(EVENT_POLL)? {

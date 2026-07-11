@@ -26,6 +26,8 @@ pub struct Model {
     /// 导航失败/不可用时的一行提示（Footer 显示；新快照到达即清）
     pub nav_error: Option<String>,
     pub in_tmux: bool,
+    /// 本地收到最近一次快照的时刻（Footer「已连接·Ns前」新鲜度用，见 apply_msg）。
+    pub last_snapshot_at: Option<std::time::Instant>,
 }
 
 /// 状态紧急度（spec §6）：waiting < working < starting < done < stale < dead
@@ -76,6 +78,7 @@ impl Model {
             selected: None,
             nav_error: None,
             in_tmux,
+            last_snapshot_at: None,
         }
     }
 
@@ -100,6 +103,12 @@ impl Model {
                 self.generated_at_ms = generated_at_ms;
                 self.connected = true;
                 self.nav_error = None; // 下一次快照自然纠正（spec §7.3）
+                // 本地 monotonic 时钟，仅用于 Footer「新鲜度」展示提示（这次快照是几秒前
+                // 收到的），不是会话状态时长计算——不违反 spec §5「时长一律从快照时钟推算，
+                // 不用本地 wall clock」的禁令，那条规则约束的是 state_since_ms 等会话内时长，
+                // 必须用 generated_at_ms 推算以避免本地/远端时钟偏移；这里是纯本地「距今几秒」，
+                // Instant 是单调时钟，同一进程内不存在偏移或回退问题。
+                self.last_snapshot_at = Some(std::time::Instant::now());
                 true
             }
             PollMsg::Disconnected => {
@@ -183,8 +192,10 @@ mod tests {
     fn snapshot_sets_connected_and_requests_redraw() {
         let mut m = Model::new(true);
         assert!(!m.connected);
+        assert!(m.last_snapshot_at.is_none(), "未收到快照前无新鲜度时间戳");
         let redraw = m.apply_msg(PollMsg::Snapshot { sessions: vec![], quota: vec![], generated_at_ms: 7 });
         assert!(redraw && m.connected && m.generated_at_ms == 7);
+        assert!(m.last_snapshot_at.is_some(), "快照到达必须记录本地收到时刻（Footer 新鲜度用）");
     }
 
     #[test]

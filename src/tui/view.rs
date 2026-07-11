@@ -2,6 +2,7 @@
 //! 布局（spec §6/§12）：Header 1 行 + 主体 + Footer 1 行；
 //! 主体 ≥100 列左右两栏(60/40)，否则上下两栏；过小则纯列表降级。
 
+use crate::config::TuiConfig;
 use crate::state::{AgentSession, ContextUsage, SessionState, Source};
 use crate::tui::model::Model;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -15,19 +16,29 @@ const WIDE_MIN_WIDTH: u16 = 100;
 const MIN_DETAIL_WIDTH: u16 = 60;
 const MIN_DETAIL_HEIGHT: u16 = 12;
 
-pub fn draw(f: &mut Frame, model: &Model) {
+// 列表列宽——list_row 与 list_header_row 共用同一组常量，表头才能保证跟数据行
+// 对齐（改列宽只需改这一处，Part1 用户验收 2026-07-11）。
+const ICON_COL_WIDTH: usize = 2; // 状态图标显示宽度不一（⚡💀=2 列 vs ✓…⏸⚠=1 列），固定 2 列防漂移（Part2a）
+const NAME_COL_WIDTH: usize = 20;
+const AGENT_COL_WIDTH: usize = 6;
+const MODEL_COL_WIDTH: usize = 14;
+const CTX_COL_WIDTH: usize = 4;
+/// List 高亮符号（选中行前缀列）；表头缩进用同一个常量算宽度，避免两处分叉。
+const LIST_HIGHLIGHT_SYMBOL: &str = "▶";
+
+pub fn draw(f: &mut Frame, model: &Model, styles: &StateStyles) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
         .split(f.area());
     f.render_widget(Paragraph::new(header_line(model)), rows[0]);
-    draw_body(f, rows[1], model);
+    draw_body(f, rows[1], model, styles);
     f.render_widget(Paragraph::new(footer_line(model)), rows[2]);
 }
 
-fn draw_body(f: &mut Frame, area: Rect, model: &Model) {
+fn draw_body(f: &mut Frame, area: Rect, model: &Model, styles: &StateStyles) {
     if area.width < MIN_DETAIL_WIDTH || area.height < MIN_DETAIL_HEIGHT {
-        draw_list(f, area, model); // 窄窗降级：纯列表（spec §12）
+        draw_list(f, area, model, styles); // 窄窗降级：纯列表（spec §12）
         return;
     }
     let chunks = if area.width >= WIDE_MIN_WIDTH {
@@ -41,8 +52,8 @@ fn draw_body(f: &mut Frame, area: Rect, model: &Model) {
             .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
             .split(area)
     };
-    draw_list(f, chunks[0], model);
-    draw_detail(f, chunks[1], model);
+    draw_list(f, chunks[0], model, styles);
+    draw_detail(f, chunks[1], model, styles);
 }
 
 fn header_line(model: &Model) -> Line<'static> {
@@ -57,17 +68,18 @@ fn header_line(model: &Model) -> Line<'static> {
         }
     }
     let bold = Style::default().add_modifier(Modifier::BOLD);
-    // 四段计数按状态色着色，与列表行/详情首行同色（state_style）；" tfa " 标题与
-    // 分隔空格保留原有 BOLD，burn 文本保持默认样式不着色（spec 要求）。
+    // 四段计数一律 plain text，不再按状态色着色（Part2b 用户验收 2026-07-11，
+    // 取代首版"与列表行/详情首行同色"的设计）；" tfa " 标题与分隔空格保留原有
+    // BOLD（结构样式，不算「颜色」），burn 文本同样保持默认样式。
     let mut spans = vec![
         Span::styled(" tfa  ", bold),
-        Span::styled(format!("⚡{working}"), Style::default().fg(Color::Green)),
+        Span::raw(format!("⚡{working}")),
         Span::styled(" ", bold),
-        Span::styled(format!("⏸{waiting}"), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw(format!("⏸{waiting}")),
         Span::styled(" ", bold),
-        Span::styled(format!("✓{done}"), Style::default().fg(Color::Cyan)),
+        Span::raw(format!("✓{done}")),
         Span::styled(" ", bold),
-        Span::styled(format!("💀{dead}"), Style::default().fg(Color::DarkGray)),
+        Span::raw(format!("💀{dead}")),
     ];
     let mut burn = String::new();
     for q in &model.quota {
@@ -83,34 +95,70 @@ fn footer_line(model: &Model) -> Line<'static> {
     let status = if let Some(err) = &model.nav_error {
         Span::styled(err.clone(), Style::default().fg(Color::Red))
     } else if model.connected {
-        Span::styled("已连接".to_string(), Style::default().fg(Color::Green))
+        // Instant::now() 这里只用于「新鲜度」展示（距上次收到快照过了几秒），不是
+        // 会话状态时长计算——不违反 spec §5「时长一律从快照时钟推算，不用本地
+        // wall clock」的禁令（那条规则约束 state_since_ms 等会话内时长，必须用
+        // generated_at_ms 推算避免本地/远端时钟偏移）。last_snapshot_at 是单调
+        // 时钟时间戳，同进程内量「距今几秒」天然无偏移/回退问题。
+        let suffix = model.last_snapshot_at.map(|t| fmt_freshness(t.elapsed().as_secs())).unwrap_or_default();
+        Span::styled(format!("已连接·{suffix}"), Style::default().fg(Color::Green))
     } else {
         Span::styled("重连中…".to_string(), Style::default().fg(Color::Yellow))
     };
     Line::from(vec![Span::raw(" ↑↓/jk 选  ⏎ 跳转  q 退出 · 1s 刷新 · "), status])
 }
 
-fn draw_list(f: &mut Frame, area: Rect, model: &Model) {
+/// Footer「已连接·」后缀——<2s 内收到的快照算「刚刚」，避免 0s/1s 这种没有信息量
+/// 的抖动数字；≥2s 起显示精确秒数，方便判断 daemon 是否卡住（Part3 用户验收）。
+pub fn fmt_freshness(elapsed_secs: u64) -> String {
+    if elapsed_secs < 2 {
+        "刚刚".to_string()
+    } else {
+        format!("{elapsed_secs}s前")
+    }
+}
+
+fn draw_list(f: &mut Frame, area: Rect, model: &Model, styles: &StateStyles) {
+    let block = Block::default().borders(Borders::ALL).title("会话");
     if model.sessions.is_empty() {
-        let block = Block::default().borders(Borders::ALL).title("会话");
         f.render_widget(Paragraph::new("暂无活跃 agent").block(block), area);
         return;
     }
+    // Block 画在外层 area，内部再拆「表头 1 行 + List」——比另起一个 Layout 拆外层
+    // 更省一层嵌套：block 的上/左边框天然成为表头的上边框，无需单独画（Part1 用户验收）。
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    // 表头缩进对齐 List 的高亮符号预留列——List::highlight_spacing 默认
+    // WhenSelected，选中恒非空（Model 非空列表必有选中）时等价 Always，数据行
+    // 内容实际从 inner.x + 高亮符号宽度开始；表头是独立 Paragraph（不经过
+    // List），不手动补这段缩进就会整体左移一列，和数据行错位。
+    let indent = " ".repeat(LIST_HIGHLIGHT_SYMBOL.width());
+    f.render_widget(
+        Paragraph::new(format!("{indent}{}", list_header_row()))
+            .style(Style::default().add_modifier(Modifier::DIM | Modifier::UNDERLINED)),
+        rows[0],
+    );
+
     let items: Vec<ListItem> = model
         .sessions
         .iter()
-        .map(|s| ListItem::new(list_row(s, model.generated_at_ms)).style(state_style(&s.state)))
+        .map(|s| ListItem::new(list_row(s, model.generated_at_ms)).style(styles.for_state(&s.state)))
         .collect();
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("会话"))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
-        .highlight_symbol("▶");
+        .highlight_symbol(LIST_HIGHLIGHT_SYMBOL);
     let mut state = ListState::default();
     state.select(model.selected_index());
+    let area = rows[1];
     f.render_stateful_widget(list, area, &mut state);
 }
 
-fn draw_detail(f: &mut Frame, area: Rect, model: &Model) {
+fn draw_detail(f: &mut Frame, area: Rect, model: &Model, styles: &StateStyles) {
     let block = Block::default().borders(Borders::ALL).title("详情");
     let Some(s) = model.selected_session() else {
         f.render_widget(Paragraph::new("暂无活跃 agent").block(block), area);
@@ -120,7 +168,7 @@ fn draw_detail(f: &mut Frame, area: Rect, model: &Model) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
         format!("{} {}  已持续 {dur}", state_icon(&s.state), state_name(&s.state)),
-        state_style(&s.state),
+        styles.for_state(&s.state),
     )));
     if let SessionState::WaitingInput { reason } = &s.state {
         lines.push(Line::from(format!("等待原因: {reason}")));
@@ -188,17 +236,95 @@ pub fn state_name(s: &SessionState) -> &'static str {
     }
 }
 
-/// 按状态紧急度着色（列表行 + 详情首行共用，spec 要求同色）：
-/// WaitingInput → 黄+粗体（最紧急，需要用户回应）；Working → 绿；Starting →
-/// 默认；Done → 青；Stale → 洋红；Dead → 灰（沿用既有灰显）。
-pub fn state_style(s: &SessionState) -> Style {
-    match s {
-        SessionState::WaitingInput { .. } => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        SessionState::Working => Style::default().fg(Color::Green),
-        SessionState::Starting => Style::default(),
-        SessionState::Done => Style::default().fg(Color::Cyan),
-        SessionState::Stale => Style::default().fg(Color::Magenta),
-        SessionState::Dead => Style::default().fg(Color::DarkGray),
+/// 每状态渲染样式（列表行 + 详情首行共用同一份，spec 要求两处一致）——由 `resolve_state_styles`
+/// 从 `[tui]` 配置解析出来的纯数据表，`draw`/`draw_list`/`draw_detail` 只读不算。
+/// 保持 model 纯净（不依赖 ratatui）：这张表在 `commands/tui.rs` 里算好一次，经
+/// `draw(f, model, styles)` 的独立参数传入，不挂在 `Model` 上（Part2c 用户验收）。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StateStyles {
+    pub waiting: Style,
+    pub working: Style,
+    pub starting: Style,
+    pub done: Style,
+    pub stale: Style,
+    pub dead: Style,
+}
+
+impl StateStyles {
+    pub fn for_state(&self, s: &SessionState) -> Style {
+        match s {
+            SessionState::WaitingInput { .. } => self.waiting,
+            SessionState::Working => self.working,
+            SessionState::Starting => self.starting,
+            SessionState::Done => self.done,
+            SessionState::Stale => self.stale,
+            SessionState::Dead => self.dead,
+        }
+    }
+}
+
+/// 黑白默认（Part2b 用户验收 2026-07-11，取代首版默认彩色）：仅保留结构样式——
+/// waiting 粗体（紧急度信号不应该只靠色弱用户看不到的颜色表达）、dead 灰显（灰
+/// 不算「颜色」，两种模式下都保留）；其余状态一律不带 fg，沿用终端默认色。
+impl Default for StateStyles {
+    fn default() -> Self {
+        Self {
+            waiting: Style::default().add_modifier(Modifier::BOLD),
+            working: Style::default(),
+            starting: Style::default(),
+            done: Style::default(),
+            stale: Style::default(),
+            dead: Style::default().fg(Color::DarkGray),
+        }
+    }
+}
+
+/// `[tui]` 配置 → 渲染样式表（纯函数）。`color = false`（默认）忽略 `state_colors`
+/// 直接返回黑白默认——`color` 是总开关，不是「叠加」关系，黑白模式下配置覆盖不生效，
+/// 语义上更简单可预测。`color = true` 时按内置调色板起步，每个状态可经
+/// `state_colors` 按名覆盖（未知颜色名 → `parse_color` 返回 None → 落回调色板默认）。
+pub fn resolve_state_styles(cfg: &TuiConfig) -> StateStyles {
+    if !cfg.color {
+        return StateStyles::default();
+    }
+    let pick = |key: &str, default: Option<Color>| -> Style {
+        let color = cfg.state_colors.get(key).and_then(|v| parse_color(v)).or(default);
+        match color {
+            Some(c) => Style::default().fg(c),
+            None => Style::default(),
+        }
+    };
+    StateStyles {
+        waiting: pick("waiting", Some(Color::Cyan)).add_modifier(Modifier::BOLD),
+        working: pick("working", Some(Color::Green)),
+        starting: pick("starting", None),
+        done: pick("done", None),
+        stale: pick("stale", Some(Color::Magenta)),
+        dead: pick("dead", Some(Color::DarkGray)),
+    }
+}
+
+/// 命名颜色 → ratatui `Color`（大小写不敏感）。未知名字返回 `None`——调用方
+/// （`resolve_state_styles`）落回调色板默认，绝不因为配置写错颜色名就报错/panic。
+pub fn parse_color(name: &str) -> Option<Color> {
+    match name.to_ascii_lowercase().as_str() {
+        "black" => Some(Color::Black),
+        "red" => Some(Color::Red),
+        "green" => Some(Color::Green),
+        "yellow" => Some(Color::Yellow),
+        "blue" => Some(Color::Blue),
+        "magenta" => Some(Color::Magenta),
+        "cyan" => Some(Color::Cyan),
+        "white" => Some(Color::White),
+        "gray" | "grey" => Some(Color::Gray),
+        "darkgray" | "darkgrey" => Some(Color::DarkGray),
+        "lightred" => Some(Color::LightRed),
+        "lightgreen" => Some(Color::LightGreen),
+        "lightyellow" => Some(Color::LightYellow),
+        "lightblue" => Some(Color::LightBlue),
+        "lightmagenta" => Some(Color::LightMagenta),
+        "lightcyan" => Some(Color::LightCyan),
+        _ => None,
     }
 }
 
@@ -214,12 +340,28 @@ pub fn list_row(s: &AgentSession, generated_at_ms: u64) -> String {
     };
     format!(
         "{} {} {} {} {} {}",
-        state_icon(&s.state),
-        pad_display(name, 20),
-        pad_display(s.agent.label(), 6),
-        pad_display(&model, 14),
-        pad_display_right(&ctx, 4),
+        pad_display(state_icon(&s.state), ICON_COL_WIDTH),
+        pad_display(name, NAME_COL_WIDTH),
+        pad_display(s.agent.label(), AGENT_COL_WIDTH),
+        pad_display(&model, MODEL_COL_WIDTH),
+        pad_display_right(&ctx, CTX_COL_WIDTH),
         state_summary(s, generated_at_ms)
+    )
+}
+
+/// 列表表头——字段顺序、列宽常量与 list_row 完全同构（状态图标 / 会话 / agent /
+/// 模型 / ctx / 摘要），保证表头跟数据行逐列对齐（Part1 用户验收 2026-07-11）。
+/// 不含 List 高亮符号预留列的缩进——那是渲染层（draw_list）拼接的关注点，这里
+/// 保持纯字符串、可独立单测对齐关系。
+pub fn list_header_row() -> String {
+    format!(
+        "{} {} {} {} {} {}",
+        pad_display("状态", ICON_COL_WIDTH),
+        pad_display("会话", NAME_COL_WIDTH),
+        pad_display("agent", AGENT_COL_WIDTH),
+        pad_display("模型", MODEL_COL_WIDTH),
+        pad_display_right("ctx", CTX_COL_WIDTH),
+        "摘要"
     )
 }
 
@@ -347,6 +489,7 @@ mod tests {
     use crate::tui::poll::PollMsg;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use std::collections::BTreeMap;
 
     fn sess(pane: &str, name: Option<&str>, state: SessionState, since: u64) -> AgentSession {
         AgentSession {
@@ -390,10 +533,13 @@ mod tests {
         m
     }
 
-    fn render_text(model: &Model, w: u16, h: u16) -> String {
+    fn draw_to_buffer(model: &Model, styles: &StateStyles, w: u16, h: u16) -> ratatui::buffer::Buffer {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-        term.draw(|f| draw(f, model)).unwrap();
-        let buf = term.backend().buffer().clone();
+        term.draw(|f| draw(f, model, styles)).unwrap();
+        term.backend().buffer().clone()
+    }
+
+    fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
         let area = *buf.area();
         let mut out = String::new();
         for y in 0..area.height {
@@ -413,6 +559,22 @@ mod tests {
         out
     }
 
+    fn render_text(model: &Model, styles: &StateStyles, w: u16, h: u16) -> String {
+        buffer_text(&draw_to_buffer(model, styles, w, h))
+    }
+
+    /// 定位 `marker` 在渲染文本里第一次出现的 (列, 行)——列用 display width（不是
+    /// byte/char 下标）算，这样才能跟 `buf.cell((x,y))` 的列坐标系对上（CJK/emoji
+    /// 内容下 byte 下标和列坐标会对不上）。
+    fn find_col_row(text: &str, marker: &str) -> (u16, u16) {
+        for (y, line) in text.lines().enumerate() {
+            if let Some(idx) = line.find(marker) {
+                return (line[..idx].width() as u16, y as u16);
+            }
+        }
+        panic!("marker {marker:?} not found in:\n{text}");
+    }
+
     #[test]
     fn formatting_helpers() {
         assert_eq!(fmt_duration(5_000), "5s");
@@ -430,6 +592,33 @@ mod tests {
         assert_eq!(model_short("gpt-5.3-codex"), "gpt-5.3-codex");
         assert_eq!(truncate_chars("字".repeat(30).as_str(), 10).chars().count(), 11); // 10 + …
         assert_eq!(source_label(Source::Both), "hook+scan");
+    }
+
+    #[test]
+    fn fmt_freshness_thresholds() {
+        // Part3 用户验收：<2s 显示「刚刚」，边界 2s 起改精确秒数「Ns前」。
+        assert_eq!(fmt_freshness(0), "刚刚");
+        assert_eq!(fmt_freshness(1), "刚刚");
+        assert_eq!(fmt_freshness(2), "2s前");
+        assert_eq!(fmt_freshness(59), "59s前");
+    }
+
+    #[test]
+    fn footer_shows_freshness_suffix_when_connected() {
+        // model_with 内部调 apply_msg(Snapshot) 会把 last_snapshot_at 设成
+        // Instant::now()；渲染发生在几微秒后，elapsed < 2s，必显示「刚刚」。
+        let m = model_with(vec![], vec![], 0);
+        let text = render_text(&m, &StateStyles::default(), 120, 30);
+        assert!(text.contains("已连接·刚刚"), "connected footer must show freshness suffix:\n{text}");
+    }
+
+    #[test]
+    fn footer_disconnected_has_no_freshness_suffix() {
+        // 断连态没有「新鲜」快照可言——保持既有 重连中… 文案，不拼接后缀。
+        let m = Model::new(true);
+        let text = render_text(&m, &StateStyles::default(), 120, 30);
+        assert!(text.contains("重连中…"), "disconnected footer unchanged:\n{text}");
+        assert!(!text.contains("重连中…·"), "disconnected footer must not gain a freshness suffix:\n{text}");
     }
 
     #[test]
@@ -482,6 +671,103 @@ mod tests {
     }
 
     #[test]
+    fn parse_color_known_names_case_insensitive() {
+        assert_eq!(parse_color("cyan"), Some(Color::Cyan));
+        assert_eq!(parse_color("CYAN"), Some(Color::Cyan));
+        assert_eq!(parse_color("Magenta"), Some(Color::Magenta));
+        assert_eq!(parse_color("darkgray"), Some(Color::DarkGray));
+        assert_eq!(parse_color("DarkGrey"), Some(Color::DarkGray));
+        assert_eq!(parse_color("gray"), Some(Color::Gray));
+        assert_eq!(parse_color("grey"), Some(Color::Gray));
+        assert_eq!(parse_color("lightred"), Some(Color::LightRed));
+        assert_eq!(parse_color("LIGHTCYAN"), Some(Color::LightCyan));
+        assert_eq!(parse_color("black"), Some(Color::Black));
+        assert_eq!(parse_color("white"), Some(Color::White));
+    }
+
+    #[test]
+    fn parse_color_unknown_name_returns_none() {
+        assert_eq!(parse_color("chartreuse"), None);
+        assert_eq!(parse_color(""), None);
+        assert_eq!(parse_color("#ff0000"), None);
+    }
+
+    #[test]
+    fn resolve_state_styles_monochrome_default_has_no_fg_except_dead() {
+        // 黑白默认（Part2b 用户验收）：仅 waiting 粗体 + dead 灰是允许的结构样式，
+        // 其余状态一律不带 fg（终端默认色）。
+        let styles = resolve_state_styles(&TuiConfig::default());
+        assert_eq!(styles.waiting.fg, None);
+        assert!(styles.waiting.add_modifier.contains(Modifier::BOLD), "waiting 粗体两种模式都生效");
+        assert_eq!(styles.working.fg, None);
+        assert_eq!(styles.starting.fg, None);
+        assert_eq!(styles.done.fg, None);
+        assert_eq!(styles.stale.fg, None);
+        assert_eq!(styles.dead.fg, Some(Color::DarkGray), "dead 灰显在黑白模式下也保留（gray is fine in monochrome）");
+    }
+
+    #[test]
+    fn resolve_state_styles_color_mode_uses_palette_and_overrides() {
+        let mut cfg = TuiConfig { color: true, state_colors: BTreeMap::new() };
+        let styles = resolve_state_styles(&cfg);
+        assert_eq!(styles.waiting.fg, Some(Color::Cyan));
+        assert!(styles.waiting.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(styles.working.fg, Some(Color::Green));
+        assert_eq!(styles.starting.fg, None, "starting 调色板默认沿用终端色");
+        assert_eq!(styles.done.fg, None, "done 调色板默认沿用终端色");
+        assert_eq!(styles.stale.fg, Some(Color::Magenta));
+        assert_eq!(styles.dead.fg, Some(Color::DarkGray));
+
+        cfg.state_colors.insert("waiting".into(), "magenta".into());
+        cfg.state_colors.insert("done".into(), "not-a-real-color".into());
+        let overridden = resolve_state_styles(&cfg);
+        assert_eq!(overridden.waiting.fg, Some(Color::Magenta), "state_colors 覆盖调色板默认");
+        assert!(overridden.waiting.add_modifier.contains(Modifier::BOLD), "覆盖颜色不影响 waiting 粗体");
+        assert_eq!(overridden.done.fg, None, "未知颜色名→parse_color 返回 None→回退调色板默认（done 的默认本就是 None，沿用终端色）");
+    }
+
+    #[test]
+    fn monochrome_waiting_row_cell_is_bold_without_fg() {
+        let styles = StateStyles::default();
+        let m = model_with(
+            vec![sess("%1", Some("api"), SessionState::WaitingInput { reason: "perm".into() }, 0)],
+            vec![],
+            0,
+        );
+        let buf = draw_to_buffer(&m, &styles, 120, 30);
+        let text = buffer_text(&buf);
+        let (x, y) = find_col_row(&text, "api");
+        let cell = buf.cell((x, y)).expect("cell in bounds");
+        assert!(cell.modifier.contains(Modifier::BOLD), "waiting 行必须粗体（黑白默认）");
+        assert_eq!(cell.fg, Color::Reset, "黑白默认下 fg 保持终端默认（未设置任何颜色）");
+    }
+
+    #[test]
+    fn color_mode_waiting_row_cell_fg_matches_resolved_palette() {
+        let cfg = TuiConfig { color: true, state_colors: BTreeMap::new() };
+        let styles = resolve_state_styles(&cfg);
+        let m = model_with(
+            vec![sess("%1", Some("api"), SessionState::WaitingInput { reason: "perm".into() }, 0)],
+            vec![],
+            0,
+        );
+        let buf = draw_to_buffer(&m, &styles, 120, 30);
+        let text = buffer_text(&buf);
+        let (x, y) = find_col_row(&text, "api");
+        let cell = buf.cell((x, y)).expect("cell in bounds");
+        assert_eq!(cell.fg, Color::Cyan, "color=true 默认调色板 waiting=Cyan");
+        assert!(cell.modifier.contains(Modifier::BOLD));
+
+        let overridden_cfg = TuiConfig { color: true, state_colors: BTreeMap::from([("waiting".to_string(), "magenta".to_string())]) };
+        let overridden_styles = resolve_state_styles(&overridden_cfg);
+        let buf2 = draw_to_buffer(&m, &overridden_styles, 120, 30);
+        let text2 = buffer_text(&buf2);
+        let (x2, y2) = find_col_row(&text2, "api");
+        let cell2 = buf2.cell((x2, y2)).expect("cell in bounds");
+        assert_eq!(cell2.fg, Color::Magenta, "state_colors 覆盖后 waiting 行 fg 跟着变");
+    }
+
+    #[test]
     fn wide_layout_header_list_detail_footer() {
         let m = model_with(
             vec![
@@ -491,9 +777,10 @@ mod tests {
             vec![quota(340_000, 552.0)],
             60_000,
         );
-        let text = render_text(&m, 120, 30);
+        let text = render_text(&m, &StateStyles::default(), 120, 30);
         assert!(text.contains("⚡1 ⏸1 ✓0 💀0"), "header counts:\n{text}");
         assert!(text.contains("claude 552 tok/min"), "header burn:\n{text}");
+        assert!(text.contains("agent") && text.contains("摘要"), "column header row:\n{text}");
         assert!(text.contains("api"), "list shows session name:\n{text}");
         assert!(text.contains("等 1m"), "waiting summary:\n{text}");
         assert!(text.contains("详情"), "detail pane title:\n{text}");
@@ -504,17 +791,72 @@ mod tests {
         assert!(text.contains("已连接"), "footer conn state:\n{text}");
     }
 
+    /// Part1 用户验收：表头字段序列必须与 list_row 共用同一组列宽常量，否则两处
+    /// 各自硬编码的宽度分叉时表头会和数据行错位。用真实构造出的两个字符串互相
+    /// 定位关键字（而不是断言写死的列号），这样宽度常量改了两处不同步时才会真正
+    /// 失败——写死列号的断言在两处「一起改错」时也会误报通过。
+    #[test]
+    fn list_header_row_aligns_with_list_row_columns() {
+        let header = list_header_row();
+        assert!(header.contains("会话") && header.contains("agent") && header.contains("模型"));
+        assert!(header.contains("ctx") && header.contains("摘要"));
+        let s = sess("%1", Some("api"), SessionState::Working, 0);
+        let row = list_row(&s, 0);
+        let header_name_col = header.split("会话").next().unwrap().width();
+        let row_name_col = row.split("api").next().unwrap().width();
+        assert_eq!(
+            header_name_col, row_name_col,
+            "会话/name 列必须对齐：header={header:?} row={row:?}"
+        );
+    }
+
+    /// Part2(a) 用户验收：状态图标显示宽度不一（⚡💀=2 列，✓…⏸⚠=1 列，见
+    /// unicode-width 实测），未 pad 到统一宽度时后续列会按状态整体漂移一列。
+    /// 覆盖全部 6 个状态（含 spec 措辞里点名的 waiting/done），通过 TestBackend
+    /// 真实渲染后在 buffer 里定位每行 session name 的起始列，断言全部相等。
+    #[test]
+    fn icon_padding_keeps_name_column_aligned_across_states() {
+        let states: Vec<(&str, SessionState)> = vec![
+            ("nWork", SessionState::Working),
+            ("nWait", SessionState::WaitingInput { reason: "x".into() }),
+            ("nStart", SessionState::Starting),
+            ("nDone", SessionState::Done),
+            ("nStale", SessionState::Stale),
+            ("nDead", SessionState::Dead),
+        ];
+        let sessions: Vec<AgentSession> = states
+            .iter()
+            .enumerate()
+            .map(|(i, (name, st))| sess(&format!("%{i}"), Some(name), st.clone(), 0))
+            .collect();
+        let m = model_with(sessions, vec![], 0);
+        let text = render_text(&m, &StateStyles::default(), 120, 30);
+        let mut offsets: Vec<(&str, usize)> = Vec::new();
+        for (name, _) in &states {
+            let line = text
+                .lines()
+                .find(|l| l.contains(name))
+                .unwrap_or_else(|| panic!("row for {name} not rendered:\n{text}"));
+            let col = line.split(name).next().unwrap().width();
+            offsets.push((name, col));
+        }
+        let first = offsets[0].1;
+        for (name, col) in &offsets {
+            assert_eq!(*col, first, "{name} 的 name 列与首行错位: offsets={offsets:?}\n{text}");
+        }
+    }
+
     #[test]
     fn narrow_width_stacks_vertically_still_has_detail() {
         let m = model_with(vec![sess("%1", Some("api"), SessionState::Working, 0)], vec![], 0);
-        let text = render_text(&m, 80, 30);
+        let text = render_text(&m, &StateStyles::default(), 80, 30);
         assert!(text.contains("详情"), "vertical layout keeps detail:\n{text}");
     }
 
     #[test]
     fn tiny_window_degrades_to_list_only() {
         let m = model_with(vec![sess("%1", Some("api"), SessionState::Working, 0)], vec![], 0);
-        let text = render_text(&m, 50, 10);
+        let text = render_text(&m, &StateStyles::default(), 50, 10);
         assert!(!text.contains("详情"), "tiny window must hide detail:\n{text}");
         assert!(text.contains("api"), "list still renders:\n{text}");
     }
@@ -522,11 +864,11 @@ mod tests {
     #[test]
     fn empty_and_disconnected_states() {
         let mut m = Model::new(true);
-        let text = render_text(&m, 120, 30);
+        let text = render_text(&m, &StateStyles::default(), 120, 30);
         assert!(text.contains("暂无活跃 agent"), "empty placeholder:\n{text}");
         assert!(text.contains("重连中…"), "not yet connected:\n{text}");
         m.nav_error = Some("该会话已结束，刷新中…".into());
-        let text = render_text(&m, 120, 30);
+        let text = render_text(&m, &StateStyles::default(), 120, 30);
         assert!(text.contains("该会话已结束，刷新中…"), "nav error in footer:\n{text}");
     }
 }

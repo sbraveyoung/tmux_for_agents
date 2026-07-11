@@ -102,6 +102,8 @@ M4 曾用 LAN web/手机方案解决「同步看」，但用户决定弃用 web 
 
 **Footer**：键位提示 `↑↓ 选  ⏎ 跳转  q 退出` + `(1s 刷新)` + 连接态（断连时 `重连中…`）。
 
+**外观（2026-07-11 用户验收决定，取代首版默认彩色）**：默认黑白（仅结构样式：waiting 行粗体、dead 行灰显、选中行反显），彩色经 config `[tui]` 开启（`color = true`），每状态可经 `state_colors` 按名覆盖内置调色板；详见 README「外观：`[tui]` 配置」。
+
 **选中延续（纯函数，可单测，防跳错目标）**：选中状态存**当前选中的 `pane_id`**（非列表下标）。每次新快照后在新排序列表里按 `pane_id` 重新定位光标；若该 `pane_id` 已从快照消失，则把光标 clamp 到原位置附近的合法行（列表空则无选中）。**理由**：1s 刷新间列表会增删重排，按下标会「看着选 A、Enter 跳到 B 的 pane」——Enter 改变物理焦点，选错代价高，必须按全局唯一 ID 延续。
 
 ## 7. 跳转导航契约（杀手锏，去风险硬伤已修）
@@ -199,6 +201,6 @@ M4 曾用 LAN web/手机方案解决「同步看」，但用户决定弃用 web 
 - **多 client 且未配 `TFA_CLIENT`**：降级为默认推断，可能切错 client——README 强调配 `TFA_CLIENT` 的键位。
 - **多实例并发**（同时开 popup + split）：各自独立每秒轮询、各自独立操作，良性竞态（后写者赢），无需加锁协调。
 - **§7.2 的 tmux 目标解析语义**跨版本差异：必须在 plan/实现期真机手验后固化 argv，不信任设计期结论直接实现。
-- **多 client attach 同一 session（已知行为，2026-07-11）**：Enter 的 `select-window` 会联动所有 attach 该 session 的 client（tmux 会话模型：一个 session 只有一个「当前 window」，非 client 私有）——要独立观察不同 agent，请让每个 client attach 不同的 session。
+- **多 client attach 同一 session（已知行为，2026-07-11）**：Enter 的 `select-window` 会联动所有 attach 该 session 的 client（tmux 会话模型：一个 session 只有一个「当前 window」，非 client 私有）——要独立观察不同 agent，请让每个 client attach 不同的 session。**Case (b)（同日补充）**：这一联动不要求两个 client 本来就 attach 同一 session——只要跳转目标恰好落在**另一个** client 正在看的 session 里，那个 client 的当前 window 也会被带着变。推荐多 client 各自独立视图用 grouped session（共享同一组窗口、但每个 session 的当前 window 各自独立维护）：`tmux new-session -t <session> -s <name>` 为每个 client 建一个 grouped session 再各自 attach，Enter 跳转就不会互相打扰；已写入 README。
 - **死亡 agent 的 pane 跳转（已知行为，2026-07-11）**：只要 pane 还存在，Enter 仍会跳转到 Dead 状态的 agent（导航目标是 pane 而非进程，便于查看现场输出或重启）；只有 pane 本身也消失时才会报「该会话已结束，刷新中…」。
 - ratatui 0.30 是较新的模块化重构版（0.29→0.30 拆分了 crates），实现期注意 API 以 0.30 为准，勿照抄 0.29 教程。

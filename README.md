@@ -51,9 +51,38 @@ tmux server）下 Enter 跳转能切对 client 的承重配置——popup/split 
 - 多个 client attach **同一** session 时，Enter 跳转会联动所有这些
   client（tmux 会话模型：一个 session 只有一个当前 window，不是 client
   私有的）——要独立观察不同 agent，请让每个 client attach 不同 session。
+  这一联动还有一种不那么直观的触发方式：跳转目标恰好落在**另一个**
+  client 正在看的 session 里时，那个 client 的当前 window 也会跟着变——
+  即使发起跳转的你和它本来 attach 的不是同一个 session。多 client 各自
+  独立视图，推荐用 grouped session（共享窗口集合，但各 session 的当前
+  window 各自独立）：`tmux new-session -t <session> -s <name>` 为每个
+  client 建一个 grouped session 再各自 attach，Enter 跳转就不会互相打扰。
 - 死亡 agent 的 pane 若仍存在，Enter 仍会跳转过去（导航目标是 pane 不是
   进程，方便看现场输出或重启）；pane 本身消失才会报「该会话已结束，
   刷新中…」。
+- daemon 被杀（如 `pkill tfa` 或崩溃）会在下一次轮询请求时自动拉起
+  （`client::request` 的 autospawn 兜底），自愈通常快到 Footer 都来不及
+  显示「重连中…」就已经重新连上。想实际观察断连态（比如确认 Footer
+  文案），用 `TFA_NO_SPAWN=1 tfa tui` 关掉自动拉起。
+
+### 外观：`[tui]` 配置（可选）
+
+默认黑白（仅结构样式：等待行粗体、已退出行灰显、选中行反显——不依赖
+颜色区分状态）。彩色需要在 config.toml（默认 `~/.config/tfa/config.toml`，
+可用 `TFA_CONFIG_PATH` 覆盖，见下方 Environment variables）里显式开启：
+
+```toml
+[tui]
+color = true              # 默认 false（黑白）
+
+[tui.state_colors]        # 可选，覆盖内置调色板；未知颜色名→忽略、回退默认
+waiting = "magenta"       # 支持 black/red/green/yellow/blue/magenta/cyan/white/
+                           # gray|grey/darkgray|darkgrey/light 前缀系列，大小写不敏感
+```
+
+`color = true` 且未覆盖时的内置调色板：等待中 cyan+粗体、工作中 green、
+启动中/已完成沿用终端默认色、失联 magenta、已退出 darkgray。等待行的
+粗体无论是否开启颜色都保留（紧急度信号不应该只靠颜色传达）。
 
 ## Environment variables
 

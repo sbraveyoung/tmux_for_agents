@@ -70,9 +70,12 @@ fn tui_renders_sessions_and_quits_cleanly() {
 
     // 3. 隔离 tmux 的 pane 里起 tui（120x30，宽布局）
     let exit_marker = dir.path().join("tui-exit");
+    // TFA_CONFIG_PATH 指向不存在的路径——隔离测试机上真实 ~/.config/tfa/config.toml
+    // 的 [tui] 设置（同 notify_cmd.rs 的隔离方式），避免测试受运行机器本地配置影响。
     let shell_cmd = format!(
-        "TFA_SOCKET='{}' TFA_STATE_DIR='{}' TFA_NO_SPAWN=1 '{}' tui; echo $? > '{}'",
+        "TFA_SOCKET='{}' TFA_STATE_DIR='{}' TFA_NO_SPAWN=1 TFA_CONFIG_PATH='{}/nonexistent-config.toml' '{}' tui; echo $? > '{}'",
         sock_path.display(),
+        dir.path().display(),
         dir.path().display(),
         bin,
         exit_marker.display()
@@ -98,6 +101,12 @@ fn tui_renders_sessions_and_quits_cleanly() {
     assert!(last.contains("等 "), "waiting summary missing:\n{last}");
     assert!(last.contains("needs permission"), "reason missing:\n{last}");
     assert!(last.contains("已连接"), "footer conn state missing:\n{last}");
+    // Part1: 列表列头（真实子进程 + tmux capture-pane 全链路，不只是 TestBackend 单测）。
+    assert!(last.contains("agent") && last.contains("摘要"), "column header row missing:\n{last}");
+    // Part3: Footer 新鲜度后缀（真实子进程链路）——精确的 <2s/≥2s 阈值文案已有
+    // fmt_freshness 单测钉死，这里只验证前缀+分隔符确实拼接了后缀，避免在偶尔
+    // 稍慢的 CI 机器上因为具体是「刚刚」还是「2s前」而 flaky。
+    assert!(last.contains("已连接·"), "freshness suffix missing:\n{last}");
 
     // 5. q 退出 → 退出码 0（终端生命周期干净的最低自动化证明）
     tmux(&tmux_sock, &["send-keys", "-t", "0", "q"]);
