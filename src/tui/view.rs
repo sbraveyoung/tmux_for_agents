@@ -4,7 +4,8 @@
 
 use crate::config::TuiConfig;
 use crate::state::{AgentSession, ContextUsage, SessionState, Source};
-use crate::tui::model::Model;
+use crate::tui::i18n::Texts;
+use crate::tui::model::{Model, NavError};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -26,19 +27,19 @@ const CTX_COL_WIDTH: usize = 4;
 /// List 高亮符号（选中行前缀列）；表头缩进用同一个常量算宽度，避免两处分叉。
 const LIST_HIGHLIGHT_SYMBOL: &str = "▶";
 
-pub fn draw(f: &mut Frame, model: &Model, styles: &StateStyles) {
+pub fn draw(f: &mut Frame, model: &Model, styles: &StateStyles, texts: &Texts) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)])
         .split(f.area());
     f.render_widget(Paragraph::new(header_line(model)), rows[0]);
-    draw_body(f, rows[1], model, styles);
-    f.render_widget(Paragraph::new(footer_line(model)), rows[2]);
+    draw_body(f, rows[1], model, styles, texts);
+    f.render_widget(Paragraph::new(footer_line(model, texts)), rows[2]);
 }
 
-fn draw_body(f: &mut Frame, area: Rect, model: &Model, styles: &StateStyles) {
+fn draw_body(f: &mut Frame, area: Rect, model: &Model, styles: &StateStyles, texts: &Texts) {
     if area.width < MIN_DETAIL_WIDTH || area.height < MIN_DETAIL_HEIGHT {
-        draw_list(f, area, model, styles); // 窄窗降级：纯列表（spec §12）
+        draw_list(f, area, model, styles, texts); // 窄窗降级：纯列表（spec §12）
         return;
     }
     let chunks = if area.width >= WIDE_MIN_WIDTH {
@@ -52,8 +53,8 @@ fn draw_body(f: &mut Frame, area: Rect, model: &Model, styles: &StateStyles) {
             .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
             .split(area)
     };
-    draw_list(f, chunks[0], model, styles);
-    draw_detail(f, chunks[1], model, styles);
+    draw_list(f, chunks[0], model, styles, texts);
+    draw_detail(f, chunks[1], model, styles, texts);
 }
 
 fn header_line(model: &Model) -> Line<'static> {
@@ -91,37 +92,45 @@ fn header_line(model: &Model) -> Line<'static> {
     Line::from(spans)
 }
 
-fn footer_line(model: &Model) -> Line<'static> {
+fn footer_line(model: &Model, texts: &Texts) -> Line<'static> {
     let status = if let Some(err) = &model.nav_error {
-        Span::styled(err.clone(), Style::default().fg(Color::Red))
+        // NavError 只是原因枚举——Model 语言无关，文案在这一层按 Texts 查表
+        // （2026-07-12 i18n 任务：view 层是文案的唯一来源）。
+        let msg = match err {
+            NavError::NotInTmux => texts.nav_error_not_in_tmux,
+            NavError::TargetGone => texts.nav_error_target_gone,
+        };
+        Span::styled(msg, Style::default().fg(Color::Red))
     } else if model.connected {
         // Instant::now() 这里只用于「新鲜度」展示（距上次收到快照过了几秒），不是
         // 会话状态时长计算——不违反 spec §5「时长一律从快照时钟推算，不用本地
         // wall clock」的禁令（那条规则约束 state_since_ms 等会话内时长，必须用
         // generated_at_ms 推算避免本地/远端时钟偏移）。last_snapshot_at 是单调
         // 时钟时间戳，同进程内量「距今几秒」天然无偏移/回退问题。
-        let suffix = model.last_snapshot_at.map(|t| fmt_freshness(t.elapsed().as_secs())).unwrap_or_default();
-        Span::styled(format!("已连接·{suffix}"), Style::default().fg(Color::Green))
+        let suffix = model.last_snapshot_at.map(|t| fmt_freshness(texts, t.elapsed().as_secs())).unwrap_or_default();
+        Span::styled(format!("{}·{suffix}", texts.connected), Style::default().fg(Color::Green))
     } else {
-        Span::styled("重连中…".to_string(), Style::default().fg(Color::Yellow))
+        Span::styled(texts.reconnecting.to_string(), Style::default().fg(Color::Yellow))
     };
-    Line::from(vec![Span::raw(" ↑↓/jk 选  ⏎ 跳转  q 退出 · 1s 刷新 · "), status])
+    Line::from(vec![Span::raw(format!(" {} · ", texts.footer_keys)), status])
 }
 
 /// Footer「已连接·」后缀——<2s 内收到的快照算「刚刚」，避免 0s/1s 这种没有信息量
 /// 的抖动数字；≥2s 起显示精确秒数，方便判断 daemon 是否卡住（Part3 用户验收）。
-pub fn fmt_freshness(elapsed_secs: u64) -> String {
+/// 语言相关文案（"刚刚"/"just now"、"前"/" ago"）经 `Texts` 传入，本函数本身
+/// 保持纯格式化逻辑不变（2026-07-12 i18n 任务）。
+pub fn fmt_freshness(texts: &Texts, elapsed_secs: u64) -> String {
     if elapsed_secs < 2 {
-        "刚刚".to_string()
+        texts.just_now.to_string()
     } else {
-        format!("{elapsed_secs}s前")
+        format!("{elapsed_secs}s{}", texts.ago_suffix)
     }
 }
 
-fn draw_list(f: &mut Frame, area: Rect, model: &Model, styles: &StateStyles) {
-    let block = Block::default().borders(Borders::ALL).title("会话");
+fn draw_list(f: &mut Frame, area: Rect, model: &Model, styles: &StateStyles, texts: &Texts) {
+    let block = Block::default().borders(Borders::ALL).title(texts.list_title);
     if model.sessions.is_empty() {
-        f.render_widget(Paragraph::new("暂无活跃 agent").block(block), area);
+        f.render_widget(Paragraph::new(texts.empty_placeholder).block(block), area);
         return;
     }
     // Block 画在外层 area，内部再拆「表头 1 行 + List」——比另起一个 Layout 拆外层
@@ -139,7 +148,7 @@ fn draw_list(f: &mut Frame, area: Rect, model: &Model, styles: &StateStyles) {
     // List），不手动补这段缩进就会整体左移一列，和数据行错位。
     let indent = " ".repeat(LIST_HIGHLIGHT_SYMBOL.width());
     f.render_widget(
-        Paragraph::new(format!("{indent}{}", list_header_row()))
+        Paragraph::new(format!("{indent}{}", list_header_row(texts)))
             .style(Style::default().add_modifier(Modifier::DIM | Modifier::UNDERLINED)),
         rows[0],
     );
@@ -147,7 +156,7 @@ fn draw_list(f: &mut Frame, area: Rect, model: &Model, styles: &StateStyles) {
     let items: Vec<ListItem> = model
         .sessions
         .iter()
-        .map(|s| ListItem::new(list_row(s, model.generated_at_ms)).style(styles.for_state(&s.state)))
+        .map(|s| ListItem::new(list_row(texts, s, model.generated_at_ms)).style(styles.for_state(&s.state)))
         .collect();
     let list = List::new(items)
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
@@ -158,39 +167,42 @@ fn draw_list(f: &mut Frame, area: Rect, model: &Model, styles: &StateStyles) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
-fn draw_detail(f: &mut Frame, area: Rect, model: &Model, styles: &StateStyles) {
-    let block = Block::default().borders(Borders::ALL).title("详情");
+fn draw_detail(f: &mut Frame, area: Rect, model: &Model, styles: &StateStyles, texts: &Texts) {
+    let block = Block::default().borders(Borders::ALL).title(texts.detail_title);
     let Some(s) = model.selected_session() else {
-        f.render_widget(Paragraph::new("暂无活跃 agent").block(block), area);
+        f.render_widget(Paragraph::new(texts.empty_placeholder).block(block), area);
         return;
     };
     let dur = fmt_duration(model.generated_at_ms.saturating_sub(s.state_since_ms));
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
-        format!("{} {}  已持续 {dur}", state_icon(&s.state), state_name(&s.state)),
+        format!("{} {}  {} {dur}", state_icon(&s.state), state_name(texts, &s.state), texts.label_duration),
         styles.for_state(&s.state),
     )));
     if let SessionState::WaitingInput { reason } = &s.state {
-        lines.push(Line::from(format!("等待原因: {reason}")));
+        lines.push(Line::from(format!("{}: {reason}", texts.label_reason)));
     } else if let Some(t) = &s.current_task {
-        lines.push(Line::from(format!("任务: {t}")));
+        lines.push(Line::from(format!("{}: {t}", texts.label_task)));
     }
     lines.push(Line::from(format!(
-        "模型: {} · 上下文: {}",
+        "{}: {} · {}: {}",
+        texts.label_model,
         s.model.as_deref().unwrap_or("—"),
-        fmt_ctx(s.context.as_ref())
+        texts.label_context,
+        fmt_ctx(texts, s.context.as_ref())
     )));
     if let Some(t) = &s.tokens {
         lines.push(Line::from(format!(
-            "tokens: in {} · out {} · cache_r {} · cache_c {} · 总 {}",
+            "tokens: in {} · out {} · cache_r {} · cache_c {} · {} {}",
             fmt_tokens(t.input),
             fmt_tokens(t.output),
             fmt_tokens(t.cache_read),
             fmt_tokens(t.cache_creation),
+            texts.label_total,
             fmt_tokens(t.total)
         )));
     }
-    lines.push(Line::from(format!("会话累计消耗: {}", fmt_tokens(s.consumed_tokens))));
+    lines.push(Line::from(format!("{}: {}", texts.label_session_consumed, fmt_tokens(s.consumed_tokens))));
     lines.push(Line::from(format!(
         "cwd: {} ({})",
         s.cwd.as_deref().unwrap_or("—"),
@@ -201,19 +213,23 @@ fn draw_detail(f: &mut Frame, area: Rect, model: &Model, styles: &StateStyles) {
         _ => "—".into(),
     };
     lines.push(Line::from(format!(
-        "agent: {} · 来源: {} · pid: {} · pane: {} · 窗口: {}",
+        "agent: {} · {}: {} · pid: {} · pane: {} · {}: {}",
         s.agent.label(),
+        texts.label_source,
         source_label(s.source),
         s.pid.map(|p| p.to_string()).unwrap_or_else(|| "—".into()),
         s.pane_id,
+        texts.label_window,
         window
     )));
     if let Some(q) = model.quota.iter().find(|q| q.provider == s.agent) {
         // 本地估算无真实 limit：observed 带 ≥ 前缀诚实标注，percent 恒缺省（与 tfa list 一致）
         lines.push(Line::from(format!(
-            "用量(5h窗): ≥{} · {:.1} tok/min · 本地估算",
+            "{}: ≥{} · {:.1} tok/min · {}",
+            texts.label_usage_5h,
             fmt_tokens(q.observed_tokens_this_window),
-            q.burn_rate_per_min
+            q.burn_rate_per_min,
+            texts.label_local_est
         )));
     }
     f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
@@ -230,14 +246,14 @@ pub fn state_icon(s: &SessionState) -> &'static str {
     }
 }
 
-pub fn state_name(s: &SessionState) -> &'static str {
+pub fn state_name(texts: &Texts, s: &SessionState) -> &'static str {
     match s {
-        SessionState::WaitingInput { .. } => "等待输入",
-        SessionState::Working => "工作中",
-        SessionState::Starting => "启动中",
-        SessionState::Done => "完成",
-        SessionState::Stale => "失联",
-        SessionState::Dead => "已退出",
+        SessionState::WaitingInput { .. } => texts.state_waiting,
+        SessionState::Working => texts.state_working,
+        SessionState::Starting => texts.state_starting,
+        SessionState::Done => texts.state_done,
+        SessionState::Stale => texts.state_stale,
+        SessionState::Dead => texts.state_dead,
     }
 }
 
@@ -363,7 +379,7 @@ pub fn display_name(s: &AgentSession) -> String {
     format!("{base}{suffix}")
 }
 
-pub fn list_row(s: &AgentSession, generated_at_ms: u64) -> String {
+pub fn list_row(texts: &Texts, s: &AgentSession, generated_at_ms: u64) -> String {
     // pad_display_keep_suffix (不是 pad_display(&display_name(s), …)): 长名字截断
     // 只能吃 base，坐标后缀（:w.p / %id）必须整段保留，否则两个仅坐标不同的长
     // 名字会被截成同一个可见前缀，disambiguation 功能名存实亡（review 2026-07-12
@@ -373,9 +389,9 @@ pub fn list_row(s: &AgentSession, generated_at_ms: u64) -> String {
     let ctx = match &s.context {
         Some(c) => match c.percent {
             Some(p) => format!("{p}%"),
-            None => "采集中".into(),
+            None => texts.probing.into(),
         },
-        None => "采集中".into(),
+        None => texts.probing.into(),
     };
     format!(
         "{} {} {} {} {} {}",
@@ -384,7 +400,7 @@ pub fn list_row(s: &AgentSession, generated_at_ms: u64) -> String {
         pad_display(s.agent.label(), AGENT_COL_WIDTH),
         pad_display(&model, MODEL_COL_WIDTH),
         pad_display_right(&ctx, CTX_COL_WIDTH),
-        state_summary(s, generated_at_ms)
+        state_summary(texts, s, generated_at_ms)
     )
 }
 
@@ -395,27 +411,27 @@ pub fn list_row(s: &AgentSession, generated_at_ms: u64) -> String {
 /// 一行 starting 数据（review 修复 2026-07-12）；空白无歧义且对齐不变。
 /// 不含 List 高亮符号预留列的缩进——那是渲染层（draw_list）拼接的关注点，这里
 /// 保持纯字符串、可独立单测对齐关系。
-pub fn list_header_row() -> String {
+pub fn list_header_row(texts: &Texts) -> String {
     format!(
         "{} {} {} {} {} {}",
         pad_display("", ICON_COL_WIDTH),
-        pad_display("会话", NAME_COL_WIDTH),
-        pad_display("agent", AGENT_COL_WIDTH),
-        pad_display("模型", MODEL_COL_WIDTH),
-        pad_display_right("ctx", CTX_COL_WIDTH),
-        "摘要"
+        pad_display(texts.col_session, NAME_COL_WIDTH),
+        pad_display(texts.col_agent, AGENT_COL_WIDTH),
+        pad_display(texts.col_model, MODEL_COL_WIDTH),
+        pad_display_right(texts.col_ctx, CTX_COL_WIDTH),
+        texts.col_summary
     )
 }
 
-pub fn state_summary(s: &AgentSession, generated_at_ms: u64) -> String {
+pub fn state_summary(texts: &Texts, s: &AgentSession, generated_at_ms: u64) -> String {
     let dur = fmt_duration(generated_at_ms.saturating_sub(s.state_since_ms));
     match &s.state {
-        SessionState::WaitingInput { reason } => format!("等 {dur} · {}", truncate_chars(reason, 30)),
-        SessionState::Working => truncate_chars(s.current_task.as_deref().unwrap_or("工作中"), 40),
-        SessionState::Done => "完成".into(),
-        SessionState::Starting => "启动中".into(),
-        SessionState::Stale => "失联".into(),
-        SessionState::Dead => "已退出".into(),
+        SessionState::WaitingInput { reason } => format!("{} {dur} · {}", texts.wait_prefix, truncate_chars(reason, 30)),
+        SessionState::Working => truncate_chars(s.current_task.as_deref().unwrap_or(texts.state_working), 40),
+        SessionState::Done => texts.state_done.into(),
+        SessionState::Starting => texts.state_starting.into(),
+        SessionState::Stale => texts.state_stale.into(),
+        SessionState::Dead => texts.state_dead.into(),
     }
 }
 
@@ -441,8 +457,8 @@ pub fn fmt_tokens(n: u64) -> String {
     }
 }
 
-pub fn fmt_ctx(c: Option<&ContextUsage>) -> String {
-    let Some(c) = c else { return "采集中".into() };
+pub fn fmt_ctx(texts: &Texts, c: Option<&ContextUsage>) -> String {
+    let Some(c) = c else { return texts.probing.into() };
     let used = fmt_tokens(c.used_tokens);
     let max = c.max_tokens.map(fmt_tokens).unwrap_or_else(|| "—".into());
     match c.percent {
@@ -559,7 +575,8 @@ mod tests {
     use crate::event::AgentKind;
     use crate::quota::{QuotaSource, QuotaState};
     use crate::state::{AgentSession, ContextUsage, SessionState, Source, TokenTotals};
-    use crate::tui::model::Model;
+    use crate::tui::i18n::{EN, ZH};
+    use crate::tui::model::{Model, NavError};
     use crate::tui::poll::PollMsg;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -609,9 +626,9 @@ mod tests {
         m
     }
 
-    fn draw_to_buffer(model: &Model, styles: &StateStyles, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    fn draw_to_buffer(model: &Model, styles: &StateStyles, texts: &Texts, w: u16, h: u16) -> ratatui::buffer::Buffer {
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-        term.draw(|f| draw(f, model, styles)).unwrap();
+        term.draw(|f| draw(f, model, styles, texts)).unwrap();
         term.backend().buffer().clone()
     }
 
@@ -635,8 +652,8 @@ mod tests {
         out
     }
 
-    fn render_text(model: &Model, styles: &StateStyles, w: u16, h: u16) -> String {
-        buffer_text(&draw_to_buffer(model, styles, w, h))
+    fn render_text(model: &Model, styles: &StateStyles, texts: &Texts, w: u16, h: u16) -> String {
+        buffer_text(&draw_to_buffer(model, styles, texts, w, h))
     }
 
     /// 定位 `marker` 在渲染文本里第一次出现的 (列, 行)——列用 display width（不是
@@ -660,10 +677,10 @@ mod tests {
         assert_eq!(fmt_tokens(178_000), "178k");
         assert_eq!(fmt_tokens(1_500_000), "1.5M");
         let ctx = ContextUsage { used_tokens: 178_000, max_tokens: Some(200_000), percent: Some(89) };
-        assert_eq!(fmt_ctx(Some(&ctx)), "178k/200k (89%)");
-        assert_eq!(fmt_ctx(None), "采集中");
+        assert_eq!(fmt_ctx(&ZH, Some(&ctx)), "178k/200k (89%)");
+        assert_eq!(fmt_ctx(&ZH, None), "采集中");
         let no_max = ContextUsage { used_tokens: 5_000, max_tokens: None, percent: None };
-        assert_eq!(fmt_ctx(Some(&no_max)), "5k/—");
+        assert_eq!(fmt_ctx(&ZH, Some(&no_max)), "5k/—");
         assert_eq!(model_short("claude-fable-5"), "fable-5");
         assert_eq!(model_short("gpt-5.3-codex"), "gpt-5.3-codex");
         assert_eq!(truncate_chars("字".repeat(30).as_str(), 10).chars().count(), 11); // 10 + …
@@ -673,10 +690,14 @@ mod tests {
     #[test]
     fn fmt_freshness_thresholds() {
         // Part3 用户验收：<2s 显示「刚刚」，边界 2s 起改精确秒数「Ns前」。
-        assert_eq!(fmt_freshness(0), "刚刚");
-        assert_eq!(fmt_freshness(1), "刚刚");
-        assert_eq!(fmt_freshness(2), "2s前");
-        assert_eq!(fmt_freshness(59), "59s前");
+        assert_eq!(fmt_freshness(&ZH, 0), "刚刚");
+        assert_eq!(fmt_freshness(&ZH, 1), "刚刚");
+        assert_eq!(fmt_freshness(&ZH, 2), "2s前");
+        assert_eq!(fmt_freshness(&ZH, 59), "59s前");
+        // EN 同一组阈值（2026-07-12 i18n 任务）：suffix 拼接方式不同（前导空格）
+        // 但阈值语义完全一致。
+        assert_eq!(fmt_freshness(&EN, 0), "just now");
+        assert_eq!(fmt_freshness(&EN, 2), "2s ago");
     }
 
     #[test]
@@ -684,7 +705,7 @@ mod tests {
         // model_with 内部调 apply_msg(Snapshot) 会把 last_snapshot_at 设成
         // Instant::now()；渲染发生在几微秒后，elapsed < 2s，必显示「刚刚」。
         let m = model_with(vec![], vec![], 0);
-        let text = render_text(&m, &StateStyles::default(), 120, 30);
+        let text = render_text(&m, &StateStyles::default(), &ZH, 120, 30);
         assert!(text.contains("已连接·刚刚"), "connected footer must show freshness suffix:\n{text}");
     }
 
@@ -692,7 +713,7 @@ mod tests {
     fn footer_disconnected_has_no_freshness_suffix() {
         // 断连态没有「新鲜」快照可言——保持既有 重连中… 文案，不拼接后缀。
         let m = Model::new(true);
-        let text = render_text(&m, &StateStyles::default(), 120, 30);
+        let text = render_text(&m, &StateStyles::default(), &ZH, 120, 30);
         assert!(text.contains("重连中…"), "disconnected footer unchanged:\n{text}");
         assert!(!text.contains("重连中…·"), "disconnected footer must not gain a freshness suffix:\n{text}");
     }
@@ -781,19 +802,30 @@ mod tests {
     fn state_summaries() {
         let now = 21 * 60_000;
         let w = sess("%1", None, SessionState::WaitingInput { reason: "needs permission".into() }, 0);
-        assert_eq!(state_summary(&w, now), "等 21m · needs permission");
+        assert_eq!(state_summary(&ZH, &w, now), "等 21m · needs permission");
         let mut d = sess("%2", None, SessionState::Done, 0);
-        assert_eq!(state_summary(&d, now), "完成");
+        assert_eq!(state_summary(&ZH, &d, now), "完成");
         d.state = SessionState::Working;
-        assert_eq!(state_summary(&d, now), "fix the bug");
+        assert_eq!(state_summary(&ZH, &d, now), "fix the bug");
         d.current_task = None;
-        assert_eq!(state_summary(&d, now), "工作中");
+        assert_eq!(state_summary(&ZH, &d, now), "工作中");
         d.state = SessionState::Stale;
-        assert_eq!(state_summary(&d, now), "失联");
+        assert_eq!(state_summary(&ZH, &d, now), "失联");
         d.state = SessionState::Dead;
-        assert_eq!(state_summary(&d, now), "已退出");
+        assert_eq!(state_summary(&ZH, &d, now), "已退出");
         d.state = SessionState::Starting;
-        assert_eq!(state_summary(&d, now), "启动中");
+        assert_eq!(state_summary(&ZH, &d, now), "启动中");
+    }
+
+    #[test]
+    fn state_summaries_en() {
+        // EN 同构断言（2026-07-12 i18n 任务）：不重复全部分支，只钉住 wait_prefix
+        // 拼接和一个纯状态名分支，跟 ZH 版本互为「文案表没有互相污染」的证据。
+        let now = 21 * 60_000;
+        let w = sess("%1", None, SessionState::WaitingInput { reason: "needs permission".into() }, 0);
+        assert_eq!(state_summary(&EN, &w, now), "wait 21m · needs permission");
+        let d = sess("%2", None, SessionState::Dead, 0);
+        assert_eq!(state_summary(&EN, &d, now), "exited");
     }
 
     #[test]
@@ -861,8 +893,8 @@ mod tests {
         let mut b = sess("%2", Some(long_name), SessionState::Working, 0);
         b.window_index = Some(12);
         b.pane_index = Some(3);
-        let row_a = list_row(&a, 0);
-        let row_b = list_row(&b, 0);
+        let row_a = list_row(&ZH, &a, 0);
+        let row_b = list_row(&ZH, &b, 0);
         assert_ne!(
             row_a, row_b,
             "two long names differing only by coordinate suffix must render differently:\na={row_a:?}\nb={row_b:?}"
@@ -909,7 +941,7 @@ mod tests {
 
     #[test]
     fn resolve_state_styles_color_mode_uses_palette_and_overrides() {
-        let mut cfg = TuiConfig { color: true, state_colors: BTreeMap::new() };
+        let mut cfg = TuiConfig { color: true, state_colors: BTreeMap::new(), ..TuiConfig::default() };
         let styles = resolve_state_styles(&cfg);
         assert_eq!(styles.waiting.fg, Some(Color::Cyan));
         assert!(styles.waiting.add_modifier.contains(Modifier::BOLD));
@@ -938,7 +970,7 @@ mod tests {
             vec![],
             0,
         );
-        let buf = draw_to_buffer(&m, &styles, 120, 30);
+        let buf = draw_to_buffer(&m, &styles, &ZH, 120, 30);
         let text = buffer_text(&buf);
         let (x, y) = find_col_row(&text, "api");
         let cell = buf.cell((x, y)).expect("cell in bounds");
@@ -948,23 +980,27 @@ mod tests {
 
     #[test]
     fn color_mode_waiting_row_cell_fg_matches_resolved_palette() {
-        let cfg = TuiConfig { color: true, state_colors: BTreeMap::new() };
+        let cfg = TuiConfig { color: true, state_colors: BTreeMap::new(), ..TuiConfig::default() };
         let styles = resolve_state_styles(&cfg);
         let m = model_with(
             vec![sess("%1", Some("api"), SessionState::WaitingInput { reason: "perm".into() }, 0)],
             vec![],
             0,
         );
-        let buf = draw_to_buffer(&m, &styles, 120, 30);
+        let buf = draw_to_buffer(&m, &styles, &ZH, 120, 30);
         let text = buffer_text(&buf);
         let (x, y) = find_col_row(&text, "api");
         let cell = buf.cell((x, y)).expect("cell in bounds");
         assert_eq!(cell.fg, Color::Cyan, "color=true 默认调色板 waiting=Cyan");
         assert!(cell.modifier.contains(Modifier::BOLD));
 
-        let overridden_cfg = TuiConfig { color: true, state_colors: BTreeMap::from([("waiting".to_string(), "magenta".to_string())]) };
+        let overridden_cfg = TuiConfig {
+            color: true,
+            state_colors: BTreeMap::from([("waiting".to_string(), "magenta".to_string())]),
+            ..TuiConfig::default()
+        };
         let overridden_styles = resolve_state_styles(&overridden_cfg);
-        let buf2 = draw_to_buffer(&m, &overridden_styles, 120, 30);
+        let buf2 = draw_to_buffer(&m, &overridden_styles, &ZH, 120, 30);
         let text2 = buffer_text(&buf2);
         let (x2, y2) = find_col_row(&text2, "api");
         let cell2 = buf2.cell((x2, y2)).expect("cell in bounds");
@@ -981,7 +1017,7 @@ mod tests {
             vec![quota(340_000, 552.0)],
             60_000,
         );
-        let text = render_text(&m, &StateStyles::default(), 120, 30);
+        let text = render_text(&m, &StateStyles::default(), &ZH, 120, 30);
         assert!(text.contains("⚡1 ⏸1 ✓0 💀0"), "header counts:\n{text}");
         assert!(text.contains("claude 552 tok/min"), "header burn:\n{text}");
         assert!(text.contains("agent") && text.contains("摘要"), "column header row:\n{text}");
@@ -1006,7 +1042,7 @@ mod tests {
         s.window_index = Some(3);
         s.pane_index = Some(0);
         let m = model_with(vec![s], vec![], 0);
-        let text = render_text(&m, &StateStyles::default(), 120, 30);
+        let text = render_text(&m, &StateStyles::default(), &ZH, 120, 30);
         assert!(text.contains("company:3.0"), "list row must show session:window.pane coordinates:\n{text}");
         assert!(text.contains("窗口: 3.0"), "detail pane must show window.pane when known:\n{text}");
     }
@@ -1017,7 +1053,7 @@ mod tests {
     /// 失败——写死列号的断言在两处「一起改错」时也会误报通过。
     #[test]
     fn list_header_row_aligns_with_list_row_columns() {
-        let header = list_header_row();
+        let header = list_header_row(&ZH);
         assert!(header.contains("会话") && header.contains("agent") && header.contains("模型"));
         assert!(header.contains("ctx") && header.contains("摘要"));
         // 图标列表头必须留空：任何截断出的 … 与 Starting 状态图标（同为 …）
@@ -1027,7 +1063,7 @@ mod tests {
             "header icon cell collides with Starting icon: {header:?}"
         );
         let s = sess("%1", Some("api"), SessionState::Working, 0);
-        let row = list_row(&s, 0);
+        let row = list_row(&ZH, &s, 0);
         let header_name_col = header.split("会话").next().unwrap().width();
         let row_name_col = row.split("api").next().unwrap().width();
         assert_eq!(
@@ -1056,7 +1092,7 @@ mod tests {
             .map(|(i, (name, st))| sess(&format!("%{i}"), Some(name), st.clone(), 0))
             .collect();
         let m = model_with(sessions, vec![], 0);
-        let text = render_text(&m, &StateStyles::default(), 120, 30);
+        let text = render_text(&m, &StateStyles::default(), &ZH, 120, 30);
         let mut offsets: Vec<(&str, usize)> = Vec::new();
         for (name, _) in &states {
             let line = text
@@ -1075,14 +1111,14 @@ mod tests {
     #[test]
     fn narrow_width_stacks_vertically_still_has_detail() {
         let m = model_with(vec![sess("%1", Some("api"), SessionState::Working, 0)], vec![], 0);
-        let text = render_text(&m, &StateStyles::default(), 80, 30);
+        let text = render_text(&m, &StateStyles::default(), &ZH, 80, 30);
         assert!(text.contains("详情"), "vertical layout keeps detail:\n{text}");
     }
 
     #[test]
     fn tiny_window_degrades_to_list_only() {
         let m = model_with(vec![sess("%1", Some("api"), SessionState::Working, 0)], vec![], 0);
-        let text = render_text(&m, &StateStyles::default(), 50, 10);
+        let text = render_text(&m, &StateStyles::default(), &ZH, 50, 10);
         assert!(!text.contains("详情"), "tiny window must hide detail:\n{text}");
         assert!(text.contains("api"), "list still renders:\n{text}");
     }
@@ -1090,11 +1126,22 @@ mod tests {
     #[test]
     fn empty_and_disconnected_states() {
         let mut m = Model::new(true);
-        let text = render_text(&m, &StateStyles::default(), 120, 30);
+        let text = render_text(&m, &StateStyles::default(), &ZH, 120, 30);
         assert!(text.contains("暂无活跃 agent"), "empty placeholder:\n{text}");
         assert!(text.contains("重连中…"), "not yet connected:\n{text}");
-        m.nav_error = Some("该会话已结束，刷新中…".into());
-        let text = render_text(&m, &StateStyles::default(), 120, 30);
+        m.nav_error = Some(NavError::TargetGone);
+        let text = render_text(&m, &StateStyles::default(), &ZH, 120, 30);
         assert!(text.contains("该会话已结束，刷新中…"), "nav error in footer:\n{text}");
+    }
+
+    #[test]
+    fn en_texts_render_connected_and_session_header() {
+        // Part1 用户验收补充（2026-07-12 i18n 任务）：EN 语言表至少覆盖一条
+        // footer 断连态文案 + 一处表头列名，防止 EN 表只是摆设、实际渲染路径
+        // 没接上。
+        let m = model_with(vec![sess("%1", Some("api"), SessionState::Working, 0)], vec![], 0);
+        let text = render_text(&m, &StateStyles::default(), &EN, 120, 30);
+        assert!(text.contains("connected"), "EN footer must show 'connected':\n{text}");
+        assert!(text.contains("Session"), "EN header must show 'Session' column cell:\n{text}");
     }
 }

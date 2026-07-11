@@ -58,16 +58,28 @@ pub struct QuotaConfig { pub burn_rate_window_mins: u64 }
 /// 显式开启后每状态可经 `state_colors` 按名覆盖内置调色板。纯数据结构——不依赖
 /// ratatui，颜色名→`ratatui::style::Color` 的解析（`parse_color`）和调色板落地
 /// （`StateStyles`/`resolve_state_styles`）都在 `tui::view`，config 只管 schema。
-/// `color`/`state_colors` 的零值恰好就是期望默认（false / 空表），
-/// `#[derive(Default)]` 足够——其余兄弟 config struct 手写 `impl Default`是因为
-/// 它们的默认值不是类型零值（如 `enabled: true`），这里没有那个理由。
-#[derive(Debug, Clone, Default, Deserialize)]
+/// `lang`（2026-07-12 i18n 任务新增）：`"auto"`（默认，按 `LANG`/`LC_*` 探测）|
+/// `"en"` | `"zh"`；解析（`tui::i18n::resolve_lang`）同样不依赖 ratatui。
+/// 手写 `impl Default`（不能再靠 `#[derive(Default)]`）：`lang` 的类型零值是
+/// 空串，不是期望默认值 `"auto"`——`color`/`state_colors` 仍然零值即默认，
+/// 但整个 struct 的默认值不再是「全字段零值」了。
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct TuiConfig {
     pub color: bool,
     /// key: waiting|working|starting|done|stale|dead；value: 颜色名（见
     /// `tui::view::parse_color`），大小写不敏感，未知名字忽略（回退调色板默认）。
     pub state_colors: BTreeMap<String, String>,
+    /// UI 语言：`"auto"` | `"en"` | `"zh"`，大小写不敏感；`"auto"`（含空串/
+    /// 任何未知取值）按 `LC_ALL`/`LC_MESSAGES`/`LANG` 环境变量探测，
+    /// 解析逻辑见 `tui::i18n::resolve_lang`。
+    pub lang: String,
+}
+
+impl Default for TuiConfig {
+    fn default() -> Self {
+        Self { color: false, state_colors: BTreeMap::new(), lang: "auto".to_string() }
+    }
 }
 
 impl Default for NotifyConfig {
@@ -133,6 +145,7 @@ mod tests {
         assert!(c.notify.quiet_hours.is_none());
         assert!(!c.tui.color, "默认黑白（Part2 用户验收 2026-07-11）");
         assert!(c.tui.state_colors.is_empty());
+        assert_eq!(c.tui.lang, "auto", "默认按 LANG/LC_* 自动探测（i18n 任务 2026-07-12）");
     }
 
     #[test]
@@ -156,6 +169,15 @@ waiting = "magenta"
         let c = Config::from_toml_str("[tui]\ncolor = true\n");
         assert!(c.tui.color);
         assert!(c.tui.state_colors.is_empty());
+        assert_eq!(c.tui.lang, "auto", "未提及的 lang 字段仍必须落到 TuiConfig::default()，不是空串");
+    }
+
+    #[test]
+    fn tui_lang_explicit_value_parses() {
+        let c = Config::from_toml_str("[tui]\nlang = \"en\"\n");
+        assert_eq!(c.tui.lang, "en");
+        let c = Config::from_toml_str("[tui]\nlang = \"zh\"\n");
+        assert_eq!(c.tui.lang, "zh");
     }
 
     #[test]

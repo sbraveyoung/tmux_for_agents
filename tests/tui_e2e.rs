@@ -70,13 +70,18 @@ fn tui_renders_sessions_and_quits_cleanly() {
 
     // 3. 隔离 tmux 的 pane 里起 tui（120x30，宽布局）
     let exit_marker = dir.path().join("tui-exit");
-    // TFA_CONFIG_PATH 指向不存在的路径——隔离测试机上真实 ~/.config/tfa/config.toml
-    // 的 [tui] 设置（同 notify_cmd.rs 的隔离方式），避免测试受运行机器本地配置影响。
+    // TFA_CONFIG_PATH 指向一个显式写好 `[tui]\nlang = "zh"` 的配置文件——不能再
+    // 指向不存在的路径：lang 缺省是 "auto"，会按运行机器的 LANG/LC_* 探测语言，
+    // 不同开发机/CI 的 locale 不一致就会让下面这些中文断言在中/英文之间随机摇摆
+    // （同 notify_cmd.rs 的隔离思路，但「文件不存在」已经不足以隔离——i18n 任务
+    // 2026-07-12 补充，locale 必须显式钉死才谈得上稳定）。
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, "[tui]\nlang = \"zh\"\n").unwrap();
     let shell_cmd = format!(
-        "TFA_SOCKET='{}' TFA_STATE_DIR='{}' TFA_NO_SPAWN=1 TFA_CONFIG_PATH='{}/nonexistent-config.toml' '{}' tui; echo $? > '{}'",
+        "TFA_SOCKET='{}' TFA_STATE_DIR='{}' TFA_NO_SPAWN=1 TFA_CONFIG_PATH='{}' '{}' tui; echo $? > '{}'",
         sock_path.display(),
         dir.path().display(),
-        dir.path().display(),
+        config_path.display(),
         bin,
         exit_marker.display()
     );
@@ -120,4 +125,36 @@ fn tui_renders_sessions_and_quits_cleanly() {
         "0",
         "tui exit code after q"
     );
+
+    // 6. EN 语言表 spot-check（cheap 可选项，i18n 任务 2026-07-12）：复用同一个
+    // 隔离 daemon/tmux server 再起一个独立 session，config 换成 lang = "en"，
+    // 只验证一处英文表头文案确实渲染出来——不是把上面的中文断言全部再抄一遍，
+    // 只用来证明 EN 语言表真的接到了真实渲染路径上，不是摆设。
+    let en_config_path = dir.path().join("config-en.toml");
+    std::fs::write(&en_config_path, "[tui]\nlang = \"en\"\n").unwrap();
+    let en_shell_cmd = format!(
+        "TFA_SOCKET='{}' TFA_STATE_DIR='{}' TFA_NO_SPAWN=1 TFA_CONFIG_PATH='{}' '{}' tui",
+        sock_path.display(),
+        dir.path().display(),
+        en_config_path.display(),
+        bin,
+    );
+    let out = tmux(&tmux_sock, &["new-session", "-d", "-s", "en-check", "-x", "120", "-y", "30", &en_shell_cmd]);
+    assert!(out.status.success(), "en-check tmux new-session failed: {}", String::from_utf8_lossy(&out.stderr));
+    let start = Instant::now();
+    let mut en_last;
+    loop {
+        let cap = tmux(&tmux_sock, &["capture-pane", "-p", "-t", "en-check"]);
+        en_last = String::from_utf8_lossy(&cap.stdout).into_owned();
+        if en_last.contains("Session") {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "EN tui never rendered 'Session' header; last capture:\n{en_last}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(en_last.contains("connected"), "EN footer must show 'connected':\n{en_last}");
+    tmux(&tmux_sock, &["send-keys", "-t", "en-check", "q"]);
 }

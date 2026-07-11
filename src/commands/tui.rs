@@ -4,7 +4,8 @@
 //! futures / async-std / crossterm `EventStream`。刷新用轮询模型
 //! （event::poll + mpsc try_recv），见 spec §9。tests/no_async_gate.rs 是门禁。
 
-use crate::tui::model::{Action, Model};
+use crate::tui::i18n::{self, Texts};
+use crate::tui::model::{Action, Model, NavError};
 use crate::tui::poll::{self, PollMsg};
 use crate::tui::view;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
@@ -14,15 +15,38 @@ use std::time::Duration;
 
 const EVENT_POLL: Duration = Duration::from_millis(150);
 
-/// README 同步维护同样两条（Task 6）；TFA_CLIENT 注入是多 client 下跳对的承重配置。
-const KEYBINDINGS: &str = r##"# ~/.tmux.conf — tfa tui 推荐键位
+/// README（README.md + README.zh-CN.md）同步维护同样两条 bind 行（Task 6）；
+/// TFA_CLIENT 注入是多 client 下跳对的承重配置。注释行英文在前、中文在后
+/// （2026-07-12 双语发布任务）——两条 `bind` 命令行本身字节不变，const/两份
+/// README/spec §11 的引用必须保持一致。
+const KEYBINDINGS: &str = r##"# ~/.tmux.conf — recommended tfa tui keybindings
+# ~/.tmux.conf — tfa tui 推荐键位
+# Note: display-popup/split-window's -e does not expand tmux formats (verified on tmux 3.7b);
 # 注意：display-popup/split-window 的 -e 不做 format 展开（tmux 3.7b 实测），
+# you must wrap with run-shell so #{client_tty} expands to a real tty before injection.
 # 必须用 run-shell 包装，让 #{client_tty} 在按键时先展开成真实 tty 再注入。
+# popup (on demand; needs tmux >= 3.2): prefix+a opens it, q/Esc closes, Enter-jump auto-closes it
 # popup（按需查看；需 tmux >= 3.2）：prefix+a 弹出，q/Esc 关闭，Enter 跳转后自动关闭
 bind a run-shell -b "tmux display-popup -c '#{client_tty}' -t '#{pane_id}' -e TFA_CLIENT='#{client_tty}' -E -w 90% -h 80% 'tfa tui'"
+# sidebar (needs tmux >= 3.1): prefix+A opens it; --stay keeps it resident after Enter jumps (the jump already happened; the original window keeps refreshing)
 # 侧栏（需 tmux >= 3.1）：prefix+A 打开；--stay 让 Enter 跳转后侧栏常驻（跳转已发生，原窗口继续刷新）
 bind A run-shell -b "tmux split-window -t '#{pane_id}' -h -l 40% -e TFA_CLIENT='#{client_tty}' 'tfa tui --stay'"
 "##;
+
+/// `[tui] lang` 之外的第二输入源：按优先级取第一个非空的 `LC_ALL` /
+/// `LC_MESSAGES` / `LANG`（glibc/POSIX locale 环境变量的标准优先级顺序）。
+/// 只在这里读一次（启动时），运行期不追踪变化——同 `[tui]` 颜色配置的
+/// 「只在启动时读一次」约定（见 `run()` 里 `resolve_state_styles` 的注释）。
+fn env_lang() -> Option<String> {
+    for var in ["LC_ALL", "LC_MESSAGES", "LANG"] {
+        if let Ok(v) = std::env::var(var) {
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
 
 pub fn run(print_keybindings: bool, stay: bool) {
     if print_keybindings {
@@ -34,12 +58,17 @@ pub fn run(print_keybindings: bool, stay: bool) {
     let tfa_client = crate::tui::nav::sanitize_client(std::env::var("TFA_CLIENT").ok());
     // 复用 daemon 同一条 config 加载路径（缺文件/坏 TOML → 默认，绝不硬失败）；
     // 只在启动时读一次，[tui] 颜色配置在运行期不热重载（Part2c 用户验收）。
-    let styles = view::resolve_state_styles(&crate::config::Config::load().tui);
+    let cfg = crate::config::Config::load();
+    let styles = view::resolve_state_styles(&cfg.tui);
+    // 语言同样只在启动时解析一次（不运行期热切换）：config 显式值优先，否则按
+    // LC_ALL/LC_MESSAGES/LANG 探测（i18n 任务 2026-07-12，见 tui::i18n::resolve_lang）。
+    let lang = i18n::resolve_lang(&cfg.tui.lang, env_lang().as_deref());
+    let texts = i18n::texts(lang);
     let (tx, rx) = mpsc::channel();
     poll::spawn(tx);
     let mut model = Model::new(in_tmux);
     let mut terminal = ratatui::init();
-    let res = event_loop(&mut terminal, &mut model, &rx, tfa_client.as_deref(), stay, &styles);
+    let res = event_loop(&mut terminal, &mut model, &rx, tfa_client.as_deref(), stay, &styles, texts);
     ratatui::restore();
     if let Err(e) = res {
         eprintln!("tfa tui: {e}");
@@ -69,11 +98,12 @@ fn event_loop(
     tfa_client: Option<&str>,
     stay: bool,
     styles: &view::StateStyles,
+    texts: &Texts,
 ) -> anyhow::Result<()> {
     let mut dirty = true;
     loop {
         if dirty {
-            terminal.draw(|f| view::draw(f, model, styles))?;
+            terminal.draw(|f| view::draw(f, model, styles, texts))?;
             dirty = false;
         }
         if event::poll(EVENT_POLL)? {
@@ -98,7 +128,7 @@ fn event_loop(
                                     }
                                 }
                                 Err(_) => {
-                                    model.nav_error = Some("该会话已结束，刷新中…".into());
+                                    model.nav_error = Some(NavError::TargetGone);
                                     dirty = true;
                                 }
                             }

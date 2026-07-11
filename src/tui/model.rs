@@ -16,6 +16,17 @@ pub enum Action {
     Navigate(String),
 }
 
+/// 导航失败/不可用的原因（语言无关——Model 不认识任何字符串文案，具体展示
+/// 文案由 `tui::view` 按当前 `Texts` 渲染，2026-07-12 i18n 任务：Model 必须
+/// 保持纯净/语言无关，不能把 UI 字面量硬编码在这一层）。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum NavError {
+    /// `$TMUX` 缺失：非 tmux 环境，Enter 跳转被禁用。
+    NotInTmux,
+    /// 跳转执行失败（目标 pane 可能已消失）；等下一次快照自然纠正。
+    TargetGone,
+}
+
 pub struct Model {
     pub sessions: Vec<AgentSession>,
     pub quota: Vec<QuotaState>,
@@ -23,8 +34,9 @@ pub struct Model {
     pub connected: bool,
     /// 当前选中会话的 pane_id（全局唯一，如 "%37"）
     pub selected: Option<String>,
-    /// 导航失败/不可用时的一行提示（Footer 显示；新快照到达即清）
-    pub nav_error: Option<String>,
+    /// 导航失败/不可用的原因（Footer 显示；新快照到达即清）。存枚举不存
+    /// 文案——渲染层按语言查表（见 `NavError` 文档）。
+    pub nav_error: Option<NavError>,
     pub in_tmux: bool,
     /// 本地收到最近一次快照的时刻（Footer「已连接·Ns前」新鲜度用，见 apply_msg）。
     pub last_snapshot_at: Option<std::time::Instant>,
@@ -143,7 +155,7 @@ impl Model {
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Enter => {
                 if !self.in_tmux {
-                    self.nav_error = Some("非 tmux 环境，跳转不可用".into());
+                    self.nav_error = Some(NavError::NotInTmux);
                     return Action::Redraw;
                 }
                 match &self.selected {
@@ -306,7 +318,7 @@ mod tests {
         let mut out_tmux = Model::new(false);
         out_tmux.apply_msg(PollMsg::Snapshot { sessions: list.clone(), quota: vec![], generated_at_ms: 1 });
         assert!(matches!(out_tmux.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)), Action::Redraw));
-        assert_eq!(out_tmux.nav_error.as_deref(), Some("非 tmux 环境，跳转不可用"));
+        assert_eq!(out_tmux.nav_error, Some(NavError::NotInTmux));
 
         let mut in_tmux = Model::new(true);
         in_tmux.apply_msg(PollMsg::Snapshot { sessions: list, quota: vec![], generated_at_ms: 1 });
