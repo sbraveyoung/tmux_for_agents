@@ -1,94 +1,195 @@
+English | [简体中文](README.zh-CN.md)
+
 # tfa — tmux for agents
 
-AI coding agent observability for tmux: who's working, who's waiting
-for you, who's done — in your status bar.
+AI coding agent observability for tmux: who's working, who's waiting for
+you, who's done — in your status bar, and in a full interactive
+dashboard when you want the details.
 
-## Install (M1)
+tfa is a small daemon + a set of agent hooks + a background scanner:
 
-    cargo install --path .
+- **hooks** report Claude Code lifecycle events (session start, prompt
+  submitted, waiting on you, stopped, tool use) to a local daemon the
+  moment they happen;
+- a **background scanner** reads agent transcripts/state directly (Claude
+  Code's JSONL sessions, Codex's sqlite state) so sessions still show up
+  even before hooks fire, and enriches every session with model, context
+  usage, and token totals;
+- the **daemon** merges both sources into one snapshot per tmux pane and
+  serves it over a local Unix socket;
+- `tfa status --format tmux` renders a one-line summary
+  (`⚡1 ⏸2 ✓1 💀0`) for your tmux `status-right`;
+- `tfa tui` renders that same snapshot as a full interactive dashboard
+  inside tmux — list + detail panes, keyboard navigation, and the killer
+  feature: select an agent and press Enter to jump straight to its pane;
+- tfa can also **proactively notify you** (desktop notification, tmux
+  status message, and/or a phone push) when an agent starts waiting on
+  your input, finishes, goes stale, or dies;
+- and it keeps a **local estimate** of your token usage/burn rate per
+  provider (not a read of your real subscription quota — see
+  [Quota](#quota-tfa-list--tfa-status---format-json) below for exactly
+  what that does and doesn't mean).
 
-Claude Code integration (inside claude):
+## Install
 
-    /plugin marketplace add ~/code/src/github.com/sbraveyoung/tmux_for_agents
-    /plugin install tfa@tfa
+### Prerequisites
 
-tmux status bar (~/.tmux.conf):
+- A Rust toolchain (`cargo`) — install via [rustup](https://rustup.rs)
+  if you don't have one.
+- tmux **>= 3.1** (the sidebar keybinding needs 3.1; the popup
+  keybinding needs **>= 3.2** for `display-popup`).
+- macOS, for the desktop-notification channel (`terminal-notifier` or
+  `osascript`) — see [Notifications](#notifications-m3) below. The rest
+  of tfa (daemon, hooks, scanner, TUI, tmux/HTTP notification channels)
+  uses only portable pieces (Unix sockets, `tmux`, `ps`) and should run
+  on Linux, but development and testing so far have been macOS-only —
+  treat Linux as untested, and expect desktop notifications specifically
+  to be a silent no-op there until someone adds a `notify-send` channel.
 
-    set -g status-interval 5
-    set -g status-right '#(tfa status --format tmux) | %H:%M'
+### 1. Clone and build
 
-New claude sessions appear automatically. Existing sessions appear
-after their next prompt, or restart them with `claude -c`.
+```sh
+git clone https://github.com/sbraveyoung/tmux_for_agents
+cd tmux_for_agents
+cargo install --path .
+```
 
-## tfa tui — tmux 内交互仪表盘
+This installs the `tfa` binary to `~/.cargo/bin` (make sure that's on
+your `PATH`).
 
-全屏 TUI：列表 + 详情两栏，↑↓/jk 选中，Enter 直接把你带到该 agent 的
-pane（只切窗口、绝不注入按键），q/Esc/Ctrl-C 退出。数据每 1s 从 daemon
-快照刷新；Footer 显示「已连接·刚刚」/「已连接·Ns前」标注快照新鲜度（<2s
-内收到算「刚刚」，之后显示精确秒数），daemon 断连时显示「重连中…」，UI
-永不冻结。
+### 2. Claude Code integration
 
-会话列显示精确坐标 `session:window.pane`（如 `company:3.0`），同一
-session 下多个 window/pane 各挂一个 agent 时也能一眼区分；坐标未知时回落
-`session %pane_id`（2026-07-12，用户验收增补）。
+Inside a Claude Code session:
 
-推荐键位（`tfa tui --print-keybindings` 可再次打印；tfa 不会自动改你的
-tmux.conf，请自行加入 `~/.tmux.conf`）：
+```
+/plugin marketplace add sbraveyoung/tmux_for_agents
+/plugin install tfa@tfa
+```
 
-    # popup（按需查看；需 tmux >= 3.2）：prefix+a 弹出
-    bind a run-shell -b "tmux display-popup -c '#{client_tty}' -t '#{pane_id}' -e TFA_CLIENT='#{client_tty}' -E -w 90% -h 80% 'tfa tui'"
-    # 侧栏（需 tmux >= 3.1）：prefix+A 打开；--stay 让 Enter 跳转后侧栏常驻（跳转已发生，原窗口继续刷新）
-    bind A run-shell -b "tmux split-window -t '#{pane_id}' -h -l 40% -e TFA_CLIENT='#{client_tty}' 'tfa tui --stay'"
+This wires up the hooks (session start/end, prompt submit, notification,
+stop, post-tool-use) that report to the tfa daemon. New Claude Code
+sessions pick them up automatically; restart already-running sessions
+(or run `claude -c` to resume one) for them to take effect.
 
-display-popup/split-window 的 `-e` 不做 format 展开（tmux 3.7b 实测），所以
-必须经 `run-shell` 让 `#{client_tty}` 先展开；`tfa` 侧对 `TFA_CLIENT` 也做
-健全性检查，配错时自动降级为单 client 模式。`-t '#{pane_id}'` 同样是必须
-的——run-shell 里的 tmux 是无 `TMUX_PANE` 的新 CLI client，不显式 `-t` 会
-回落到「最近活跃 session」启发式，可能挂错窗口。
+### 3. tmux.conf
 
-`TFA_CLIENT='#{client_tty}'` 是多 client 场景（多个终端窗口 attach 同一
-tmux server）下 Enter 跳转能切对 client 的承重配置——popup/split 子进程
-本身不是 tmux client，不注入则退化为 tmux 隐式推断，可能切错。
+Add a status-bar snippet:
 
-已知行为：
+```tmux
+set -g status-interval 5
+set -g status-right '#(tfa status --format tmux) | %H:%M'
+```
 
-- 嵌套 tmux（SSH 远端再开 tmux）下不保证跳转正确；非 tmux 环境里 Enter
-  禁用并提示。
-- 多个 client attach **同一** session 时，Enter 跳转会联动所有这些
-  client（tmux 会话模型：一个 session 只有一个当前 window，不是 client
-  私有的）——要独立观察不同 agent，请让每个 client attach 不同 session。
-  这一联动还有一种不那么直观的触发方式：跳转目标恰好落在**另一个**
-  client 正在看的 session 里时，那个 client 的当前 window 也会跟着变——
-  即使发起跳转的你和它本来 attach 的不是同一个 session。多 client 各自
-  独立视图，推荐用 grouped session（共享窗口集合，但各 session 的当前
-  window 各自独立）：`tmux new-session -t <session> -s <name>` 为每个
-  client 建一个 grouped session 再各自 attach，Enter 跳转就不会互相打扰。
-- 死亡 agent 的 pane 若仍存在，Enter 仍会跳转过去（导航目标是 pane 不是
-  进程，方便看现场输出或重启）；pane 本身消失才会报「该会话已结束，
-  刷新中…」。
-- daemon 被杀（如 `pkill tfa` 或崩溃）会在下一次轮询请求时自动拉起
-  （`client::request` 的 autospawn 兜底），自愈通常快到 Footer 都来不及
-  显示「重连中…」就已经重新连上。想实际观察断连态（比如确认 Footer
-  文案），用 `TFA_NO_SPAWN=1 tfa tui` 关掉自动拉起。
+And the recommended `tfa tui` keybindings (also printable any time via
+`tfa tui --print-keybindings`; tfa never edits your `tmux.conf` for you):
 
-### 外观：`[tui]` 配置（可选）
+```tmux
+# ~/.tmux.conf — recommended tfa tui keybindings
+# ~/.tmux.conf — tfa tui 推荐键位
+# Note: display-popup/split-window's -e does not expand tmux formats (verified on tmux 3.7b);
+# 注意：display-popup/split-window 的 -e 不做 format 展开（tmux 3.7b 实测），
+# you must wrap with run-shell so #{client_tty} expands to a real tty before injection.
+# 必须用 run-shell 包装，让 #{client_tty} 在按键时先展开成真实 tty 再注入。
+# popup (on demand; needs tmux >= 3.2): prefix+a opens it, q/Esc closes, Enter-jump auto-closes it
+# popup（按需查看；需 tmux >= 3.2）：prefix+a 弹出，q/Esc 关闭，Enter 跳转后自动关闭
+bind a run-shell -b "tmux display-popup -c '#{client_tty}' -t '#{pane_id}' -e TFA_CLIENT='#{client_tty}' -E -w 90% -h 80% 'tfa tui'"
+# sidebar (needs tmux >= 3.1): prefix+A opens it; --stay keeps it resident after Enter jumps (the jump already happened; the original window keeps refreshing)
+# 侧栏（需 tmux >= 3.1）：prefix+A 打开；--stay 让 Enter 跳转后侧栏常驻（跳转已发生，原窗口继续刷新）
+bind A run-shell -b "tmux split-window -t '#{pane_id}' -h -l 40% -e TFA_CLIENT='#{client_tty}' 'tfa tui --stay'"
+```
 
-默认黑白（仅结构样式：等待行粗体、已退出行灰显、选中行反显——不依赖
-颜色区分状态）。彩色需要在 config.toml（默认 `~/.config/tfa/config.toml`，
-可用 `TFA_CONFIG_PATH` 覆盖，见下方 Environment variables）里显式开启：
+New claude sessions appear in both the status bar and the TUI
+automatically. Existing sessions appear after their next prompt, or
+restart them with `claude -c`.
+
+### 4. Optional `~/.config/tfa/config.toml`
+
+Everything below is optional — a missing file (or `TFA_CONFIG_PATH`
+pointing nowhere) means all defaults, never a hard error. The `[tui]`
+table controls the dashboard's language/appearance:
 
 ```toml
 [tui]
-color = true              # 默认 false（黑白）
-
-[tui.state_colors]        # 可选，覆盖内置调色板；未知颜色名→忽略、回退默认
-waiting = "magenta"       # 支持 black/red/green/yellow/blue/magenta/cyan/white/
-                           # gray|grey/darkgray|darkgrey/light 前缀系列，大小写不敏感
+lang = "auto"             # "auto" (default, detects via LANG/LC_*) | "en" | "zh"
+color = false              # default false (monochrome); true enables the palette below
+[tui.state_colors]         # optional, only used when color = true
+waiting = "magenta"        # overrides one state's color; see README section below for the full list
 ```
 
-`color = true` 且未覆盖时的内置调色板：等待中 cyan+粗体、工作中 green、
-启动中/已完成沿用终端默认色、失联 magenta、已退出 darkgray。等待行的
-粗体无论是否开启颜色都保留（紧急度信号不应该只靠颜色传达）。
+Notification and quota-window settings (`[notify]`, `[quota]`) live in
+the same file — see [Notifications](#notifications-m3) and
+[Quota](#quota-tfa-list--tfa-status---format-json) below for their full
+schemas.
+
+## `tfa tui` — interactive dashboard inside tmux
+
+Full-screen TUI: list + detail two-pane layout, ↑↓/jk to select, Enter
+jumps you straight to that agent's pane (only switches window — never
+injects keystrokes into it), q/Esc/Ctrl-C to quit. Data refreshes from
+the daemon's snapshot every 1s; the footer shows "connected·just now" /
+"connected·Ns ago" to indicate snapshot freshness (under 2s counts as
+"just now", exact seconds after that), "reconnecting…" while the daemon
+is unreachable — the UI never freezes.
+
+The session column shows the precise coordinate `session:window.pane`
+(e.g. `company:3.0`) so that multiple agents in different windows/panes
+of the *same* tmux session are still distinguishable at a glance; it
+falls back to `session %pane_id` when the coordinate isn't known yet.
+
+The UI is bilingual (English/Chinese): it auto-detects your language
+from `LC_ALL`/`LC_MESSAGES`/`LANG` (first non-empty wins) at startup,
+overridable via `[tui] lang = "en" | "zh"` in `config.toml` (see above).
+
+Known behaviors:
+
+- **Nested tmux** (e.g. SSH into a remote box that also runs tmux)
+  doesn't guarantee correct jumps; outside any tmux session, Enter is
+  disabled and shows a hint instead.
+- When **multiple clients are attached to the same session**, Enter's
+  jump affects all of those clients (tmux's session model: a session
+  has one current window, not a per-client one) — to observe different
+  agents independently, attach each client to a different session. A
+  less obvious variant of the same thing: if the jump target happens to
+  land in a session that *another* client is currently looking at, that
+  client's current window changes too, even if you two didn't start out
+  attached to the same session. For fully independent multi-client
+  views, use grouped sessions (they share the same window set, but each
+  has its own independent "current window"):
+  `tmux new-session -t <session> -s <name>` per client, then attach each
+  one separately — Enter jumps then won't step on each other.
+- If a **dead agent's pane still exists**, Enter still jumps to it (the
+  navigation target is the pane, not the process, so you can inspect
+  the last output or restart it there); only once the pane itself is
+  gone does it report "session ended, refreshing…".
+- If the **daemon is killed** (e.g. `pkill tfa`, or a crash), it's
+  auto-respawned on the next poll (`client::request`'s autospawn
+  fallback) — recovery is usually faster than the footer even has a
+  chance to show "reconnecting…". To actually observe the disconnected
+  state (e.g. to confirm the footer text), disable autospawn with
+  `TFA_NO_SPAWN=1 tfa tui`.
+
+### Appearance: `[tui]` config (optional)
+
+Monochrome by default (structural styling only: the waiting row is
+bold, the exited row is dimmed gray, the selected row is reverse-video —
+no color is required to tell states apart). Color needs to be turned on
+explicitly in `config.toml` (default
+`~/.config/tfa/config.toml`, overridable with `TFA_CONFIG_PATH`, see
+Environment variables below):
+
+```toml
+[tui]
+color = true              # default false (monochrome)
+
+[tui.state_colors]        # optional, overrides the built-in palette; unknown color names are ignored
+waiting = "magenta"       # supports black/red/green/yellow/blue/magenta/cyan/white/
+                           # gray|grey/darkgray|darkgrey/light-prefixed variants, case-insensitive
+```
+
+Built-in palette when `color = true` and a state isn't overridden:
+waiting = cyan+bold, working = green, starting/done = terminal default,
+stale = magenta, exited = darkgray. The waiting row's bold styling is
+kept regardless of `color` (urgency shouldn't rely on color alone).
 
 ## Environment variables
 
@@ -110,8 +211,8 @@ waiting = "magenta"       # 支持 black/red/green/yellow/blue/magenta/cyan/whit
 - `TFA_CODEX_DB` — override the path to the Codex sqlite state
   database (default `~/.codex/state_5.sqlite`).
 - `TFA_CONFIG_PATH` — override the config file path (default
-  `~/.config/tfa/config.toml`). The daemon reads this once at
-  startup; a missing file or bad TOML silently falls back to
+  `~/.config/tfa/config.toml`). The daemon (and `tfa tui`) reads this
+  once at startup; a missing file or bad TOML silently falls back to
   defaults (never a hard error).
 
 Testing/advanced (not needed for normal use):
