@@ -30,9 +30,9 @@ pane（只切窗口、绝不注入按键），q/Esc/Ctrl-C 退出。数据每 1s
 tmux.conf，请自行加入 `~/.tmux.conf`）：
 
     # popup（按需查看；需 tmux >= 3.2）：prefix+a 弹出
-    bind a run-shell -b "tmux display-popup -c '#{client_tty}' -e TFA_CLIENT='#{client_tty}' -E -w 90% -h 80% 'tfa tui'"
+    bind a run-shell -b "tmux display-popup -c '#{client_tty}' -t '#{pane_id}' -e TFA_CLIENT='#{client_tty}' -E -w 90% -h 80% 'tfa tui'"
     # 侧栏（任意 tmux 版本）：prefix+A 打开；Enter 跳转后侧栏关闭
-    bind A run-shell -b "tmux split-window -h -l 40% -e TFA_CLIENT='#{client_tty}' 'tfa tui'"
+    bind A run-shell -b "tmux split-window -t '#{pane_id}' -h -l 40% -e TFA_CLIENT='#{client_tty}' 'tfa tui'"
 
 display-popup/split-window 的 `-e` 不做 format 展开（tmux 3.7b 实测），所以
 必须经 `run-shell` 让 `#{client_tty}` 先展开；`tfa` 侧对 `TFA_CLIENT` 也做
