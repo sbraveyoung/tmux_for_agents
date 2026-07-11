@@ -20,3 +20,14 @@ fn status_without_daemon_reports_empty() {
         .args(["status", "--format", "tmux"]);
     cmd.assert().success().stdout(predicates::str::contains("tfa:off"));
 }
+
+#[test]
+fn tui_print_keybindings_outputs_both_bindings() {
+    // --print-keybindings 在 ratatui::init 之前返回，不碰终端，可安全 spawn
+    let mut cmd = Command::cargo_bin("tfa").unwrap();
+    let assert = cmd.args(["tui", "--print-keybindings"]).assert().success();
+    let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(out.contains("display-popup"), "popup binding missing: {out}");
+    assert!(out.contains("split-window"), "split binding missing: {out}");
+    assert!(out.contains(r##"TFA_CLIENT="#{client_tty}""##), "TFA_CLIENT injection missing: {out}");
+}

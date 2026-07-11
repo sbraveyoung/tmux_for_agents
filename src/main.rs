@@ -49,7 +49,11 @@ enum Command {
         action: String,
     },
     /// Interactive full-screen dashboard (run inside tmux)
-    Tui,
+    Tui {
+        /// Print recommended tmux keybindings and exit
+        #[arg(long)]
+        print_keybindings: bool,
+    },
 }
 
 fn main() {
@@ -71,6 +75,6 @@ fn main() {
             _ => println!("{{\"sessions\":[],\"quota\":[]}}"),
         },
         Command::Notify { action } => commands::notify::run(&action),
-        Command::Tui => commands::tui::run(),
+        Command::Tui { print_keybindings } => commands::tui::run(print_keybindings),
     }
 }

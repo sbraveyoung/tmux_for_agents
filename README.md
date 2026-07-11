@@ -20,6 +20,27 @@ tmux status bar (~/.tmux.conf):
 New claude sessions appear automatically. Existing sessions appear
 after their next prompt, or restart them with `claude -c`.
 
+## tfa tui — tmux 内交互仪表盘
+
+全屏 TUI：列表 + 详情两栏，↑↓/jk 选中，Enter 直接把你带到该 agent 的
+pane（只切窗口、绝不注入按键），q/Esc/Ctrl-C 退出。数据每 1s 从 daemon
+快照刷新；daemon 断连时显示「重连中…」，UI 永不冻结。
+
+推荐键位（`tfa tui --print-keybindings` 可再次打印；tfa 不会自动改你的
+tmux.conf，请自行加入 `~/.tmux.conf`）：
+
+    # popup（按需查看；需 tmux >= 3.2）：prefix+a 弹出
+    bind a display-popup -E -w 90% -h 80% -e TFA_CLIENT="#{client_tty}" "tfa tui"
+    # 侧栏（任意 tmux 版本）：prefix+A 打开；Enter 跳转后侧栏关闭
+    bind A split-window -h -l 40% -e TFA_CLIENT="#{client_tty}" "tfa tui"
+
+`TFA_CLIENT="#{client_tty}"` 是多 client 场景（多个终端窗口 attach 同一
+tmux server）下 Enter 跳转能切对 client 的承重配置——popup/split 子进程
+本身不是 tmux client，不注入则退化为 tmux 隐式推断，可能切错。
+
+已知限制：嵌套 tmux（SSH 远端再开 tmux）下不保证跳转正确；非 tmux 环境
+里 Enter 禁用并提示。
+
 ## Environment variables
 
 - `TFA_BIN` — absolute path to the `tfa` binary, used by `hook.sh` to
