@@ -349,14 +349,17 @@ pub fn list_row(s: &AgentSession, generated_at_ms: u64) -> String {
     )
 }
 
-/// 列表表头——字段顺序、列宽常量与 list_row 完全同构（状态图标 / 会话 / agent /
+/// 列表表头——字段顺序、列宽常量与 list_row 完全同构（图标占位 / 会话 / agent /
 /// 模型 / ctx / 摘要），保证表头跟数据行逐列对齐（Part1 用户验收 2026-07-11）。
+/// 图标列表头刻意留空（等宽空格）：「状态」二字 4 列塞不进 2 列预算，pad_display
+/// 会截成孤零零的 …——与 Starting 状态图标（同为 …）字符级撞车，表头看起来像
+/// 一行 starting 数据（review 修复 2026-07-12）；空白无歧义且对齐不变。
 /// 不含 List 高亮符号预留列的缩进——那是渲染层（draw_list）拼接的关注点，这里
 /// 保持纯字符串、可独立单测对齐关系。
 pub fn list_header_row() -> String {
     format!(
         "{} {} {} {} {} {}",
-        pad_display("状态", ICON_COL_WIDTH),
+        pad_display("", ICON_COL_WIDTH),
         pad_display("会话", NAME_COL_WIDTH),
         pad_display("agent", AGENT_COL_WIDTH),
         pad_display("模型", MODEL_COL_WIDTH),
@@ -719,11 +722,14 @@ mod tests {
         assert_eq!(styles.dead.fg, Some(Color::DarkGray));
 
         cfg.state_colors.insert("waiting".into(), "magenta".into());
-        cfg.state_colors.insert("done".into(), "not-a-real-color".into());
+        // 无效颜色名的回退必须用「调色板默认非 None」的状态才验得出来——用 done
+        // （默认本就 None）断言 None 分不清「回退成功」和「覆盖成 None」（review
+        // c5a823d 修复项）。dead 默认 Some(DarkGray)：无效名回退后必须原样保留。
+        cfg.state_colors.insert("dead".into(), "not-a-real-color".into());
         let overridden = resolve_state_styles(&cfg);
         assert_eq!(overridden.waiting.fg, Some(Color::Magenta), "state_colors 覆盖调色板默认");
         assert!(overridden.waiting.add_modifier.contains(Modifier::BOLD), "覆盖颜色不影响 waiting 粗体");
-        assert_eq!(overridden.done.fg, None, "未知颜色名→parse_color 返回 None→回退调色板默认（done 的默认本就是 None，沿用终端色）");
+        assert_eq!(overridden.dead.fg, Some(Color::DarkGray), "无效颜色名→parse_color 返回 None→回退调色板默认 DarkGray，而非清掉颜色");
     }
 
     #[test]
@@ -800,6 +806,12 @@ mod tests {
         let header = list_header_row();
         assert!(header.contains("会话") && header.contains("agent") && header.contains("模型"));
         assert!(header.contains("ctx") && header.contains("摘要"));
+        // 图标列表头必须留空：任何截断出的 … 与 Starting 状态图标（同为 …）
+        // 字符级撞车，表头会被误读成一行 starting 数据（review c5a823d 修复项）。
+        assert!(
+            !header.contains(state_icon(&SessionState::Starting)),
+            "header icon cell collides with Starting icon: {header:?}"
+        );
         let s = sess("%1", Some("api"), SessionState::Working, 0);
         let row = list_row(&s, 0);
         let header_name_col = header.split("会话").next().unwrap().width();
