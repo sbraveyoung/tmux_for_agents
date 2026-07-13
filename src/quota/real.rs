@@ -36,7 +36,15 @@ pub fn parse_iso8601_ms(s: &str) -> Option<u64> {
     if b[4] != b'-' || b[7] != b'-' || b[10] != b'T' || b[13] != b':' || b[16] != b':' { return None; }
     let (y, mo, d) = (num(0..4)?, num(5..7)? as u32, num(8..10)? as u32);
     let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || sec > 60 { return None; }
+    if !(1..=12).contains(&mo) || !(0..=23).contains(&h) || !(0..=59).contains(&mi) || !(0..=60).contains(&sec) { return None; }
+    // 日历严格：日分量必须真实存在于该年月，否则 days_from_civil 会静默滚动进位（2026-02-31 → 3 月 3 日）。
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days_in_month: u32 = match mo {
+        2 => if leap { 29 } else { 28 },
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if !(1..=days_in_month).contains(&d) { return None; }
     // 小数秒（可选）→ 毫秒
     let mut i = 19;
     let mut frac_ms: i64 = 0;
@@ -56,6 +64,7 @@ pub fn parse_iso8601_ms(s: &str) -> Option<u64> {
             if b.len() != i + 6 || b[i + 3] != b':' { return None; }
             let oh: i64 = s.get(i + 1..i + 3)?.parse().ok()?;
             let om: i64 = s.get(i + 4..i + 6)?.parse().ok()?;
+            if !(0..=23).contains(&oh) || !(0..=59).contains(&om) { return None; }
             let v = oh * 3600 + om * 60;
             if *sign == b'+' { v } else { -v }
         }
@@ -101,6 +110,8 @@ mod tests {
         assert_eq!(parse_iso8601_ms("2026-03-27T10:00:00Z"), Some(1_774_605_600_000));
         // 正偏移：本地 10:00 @ +08:00 = UTC 02:00 → 减 8h
         assert_eq!(parse_iso8601_ms("2026-03-27T10:00:00+08:00"), Some(1_774_605_600_000 - 8 * 3_600_000));
+        // 负偏移：本地 02:00 @ -08:00 = UTC 10:00 → 与 10:00Z 同一时刻
+        assert_eq!(parse_iso8601_ms("2026-03-27T02:00:00-08:00"), Some(1_774_605_600_000));
         // 毫秒小数容忍
         assert_eq!(parse_iso8601_ms("2026-03-27T10:00:00.500Z"), Some(1_774_605_600_500));
         // 闰年 2 月
@@ -108,6 +119,18 @@ mod tests {
         // 垃圾输入
         assert_eq!(parse_iso8601_ms("not a date"), None);
         assert_eq!(parse_iso8601_ms("2026-13-01T00:00:00Z"), None);
+    }
+
+    #[test]
+    fn iso8601_rejects_calendar_impossible_forms() {
+        // 不存在的日子必须 None，不得经 days_from_civil 滚动进位（2026-02-31 ≠ 3 月 3 日）
+        assert_eq!(parse_iso8601_ms("2026-02-31T00:00:00Z"), None);
+        // 30 天月同理（4 月无 31 日）
+        assert_eq!(parse_iso8601_ms("2026-04-31T00:00:00Z"), None);
+        // 负的子日分量不得当借位解析（10:-1 ≠ 09:59）
+        assert_eq!(parse_iso8601_ms("2026-03-27T10:-1:00Z"), None);
+        // 时区偏移分量越界（99:99）必须 None
+        assert_eq!(parse_iso8601_ms("2026-03-27T10:00:00+99:99"), None);
     }
 
     #[test]
@@ -130,6 +153,16 @@ mod tests {
         let u = parse_usage_response(body, 0).expect("parses without sonnet");
         assert_eq!(u.seven_day_sonnet_pct, None);
         assert!((u.five_hour_pct - 18.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn usage_response_reads_present_sonnet_window() {
+        let body = r#"{"five_hour":{"utilization":18.0,"resets_at":"2026-03-27T10:00:00+00:00"},
+                       "seven_day":{"utilization":17.0,"resets_at":"2026-04-02T13:00:00+00:00"},
+                       "seven_day_sonnet":{"utilization":10.0,"resets_at":"2026-04-02T13:00:00+00:00"}}"#;
+        let u = parse_usage_response(body, 0).expect("parses with sonnet");
+        let sonnet = u.seven_day_sonnet_pct.expect("sonnet 窗在场且非 null → Some");
+        assert!((sonnet - 10.0).abs() < f64::EPSILON);
     }
 
     #[test]
