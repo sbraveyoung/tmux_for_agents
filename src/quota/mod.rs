@@ -10,7 +10,7 @@ const WINDOW_5H_MS: u64 = 5 * 3_600_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum QuotaSource { LocalEstimate }
+pub enum QuotaSource { LocalEstimate, RealApi }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaState {
@@ -23,6 +23,10 @@ pub struct QuotaState {
     pub burn_rate_per_min: f64,
     pub source: QuotaSource,
     pub freshness_ms: u64,
+    #[serde(default)]
+    pub weekly_sonnet_percent: Option<u8>,
+    #[serde(default)]
+    pub weekly_reset_at_ms: Option<u64>,
 }
 
 /// 每 provider 的 5h 块锚 + 块内累计 observed。不进快照（易失，每轮重算）。
@@ -71,6 +75,8 @@ impl QuotaCache {
                 burn_rate_per_min: burn.burn_rate_per_min(&provider, now_ms),
                 source: QuotaSource::LocalEstimate,
                 freshness_ms: now_ms,
+                weekly_sonnet_percent: None,
+                weekly_reset_at_ms: None,
             });
         }
         self.states = out;
@@ -126,5 +132,18 @@ mod tests {
         cache.refresh(&burn, 5_400_000);
         let q = &cache.states()[0];
         assert_eq!(q.reset_at_ms.unwrap(), 3_600_000 + 5 * 3_600_000, "floor_to_hour(1.5h)=1h; +5h=6h");
+    }
+
+    #[test]
+    fn quota_state_new_fields_default_and_old_json_loads() {
+        // 老快照（无新字段）必须能反序列化——快照只做加法
+        let old = r#"{"provider":"claude","window_5h_percent":null,"weekly_percent":null,
+            "reset_at_ms":1,"reset_estimated":true,"observed_tokens_this_window":5,
+            "burn_rate_per_min":1.0,"source":"local_estimate","freshness_ms":2}"#;
+        let q: QuotaState = serde_json::from_str(old).unwrap();
+        assert_eq!(q.weekly_sonnet_percent, None);
+        assert_eq!(q.weekly_reset_at_ms, None);
+        // RealApi 变体 wire 形状
+        assert_eq!(serde_json::to_string(&QuotaSource::RealApi).unwrap(), r#""real_api""#);
     }
 }

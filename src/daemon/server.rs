@@ -21,7 +21,7 @@ pub fn serve(
     config: Arc<Mutex<Config>>,
     discipline: Arc<Mutex<Discipline>>,
     tx: Sender<NotifyEvent>,
-    _real_quota: Arc<Mutex<RealQuotaCell>>, // Task 4 接线：快照组装时读取并合并进 QuotaState
+    real_quota: Arc<Mutex<RealQuotaCell>>,
 ) {
     for conn in listener.incoming() {
         let Ok(stream) = conn else { continue };
@@ -31,7 +31,8 @@ pub fn serve(
         let config = Arc::clone(&config);
         let discipline = Arc::clone(&discipline);
         let tx = tx.clone();
-        std::thread::spawn(move || handle(stream, store, dirty, quota, config, discipline, tx));
+        let real_quota = Arc::clone(&real_quota);
+        std::thread::spawn(move || handle(stream, store, dirty, quota, config, discipline, tx, real_quota));
     }
 }
 
@@ -44,6 +45,7 @@ fn handle(
     config: Arc<Mutex<Config>>,
     discipline: Arc<Mutex<Discipline>>,
     tx: Sender<NotifyEvent>,
+    real_quota: Arc<Mutex<RealQuotaCell>>,
 ) {
     let mut writer = match stream.try_clone() {
         Ok(w) => w,
@@ -53,7 +55,7 @@ fn handle(
     for line in reader.lines() {
         let Ok(line) = line else { return };
         if line.trim().is_empty() { continue; }
-        let resp = respond(&line, &store, &dirty, &quota, &config, &discipline, &tx);
+        let resp = respond(&line, &store, &dirty, &quota, &config, &discipline, &tx, &real_quota);
         let mut out = serde_json::to_string(&resp).unwrap_or_default();
         out.push('\n');
         if writer.write_all(out.as_bytes()).is_err() { return; }
@@ -69,6 +71,7 @@ fn respond(
     config: &Mutex<Config>,
     discipline: &Mutex<Discipline>,
     tx: &Sender<NotifyEvent>,
+    real_quota: &Mutex<RealQuotaCell>,
 ) -> Response {
     let req: Request = match serde_json::from_str(line) {
         Ok(r) => r,
@@ -113,6 +116,7 @@ fn respond(
         Request::Snapshot => {
             let sessions = store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).sessions();
             let quota = quota.lock().unwrap_or_else(std::sync::PoisonError::into_inner).states();
+            let quota = crate::quota::real::merge(quota, real_quota, super::now_ms());
             Response::Snapshot { sessions, quota, generated_at_ms: super::now_ms() }
         }
     }

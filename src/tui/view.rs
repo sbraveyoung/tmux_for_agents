@@ -617,6 +617,8 @@ mod tests {
             burn_rate_per_min: burn,
             source: QuotaSource::LocalEstimate,
             freshness_ms: 0,
+            weekly_sonnet_percent: None,
+            weekly_reset_at_ms: None,
         }
     }
 

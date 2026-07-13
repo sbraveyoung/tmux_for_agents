@@ -251,6 +251,34 @@ pub fn spawn(
     });
 }
 
+/// 真实值粘滞 TTL（spec §7）：Instant 单调钟计龄，过期即回落本地估算。
+pub const TTL_SECS: u64 = 1800;
+
+/// 快照组装处的合并（spec §5）：本地估算 + 新鲜真实值叠加。TTL 内才覆盖 Claude 条目的
+/// 百分比/重置时间/来源/新鲜度；`observed_tokens_this_window`/`burn_rate_per_min` 永远
+/// 保留本地观测——真实接口不提供这两个量，覆盖会丢失信息。过期或 cell 为空均原样返回
+/// local（诚实：绝不用陈旧真实值冒充新鲜）。
+pub fn merge(
+    mut local: Vec<crate::quota::QuotaState>,
+    cell: &std::sync::Mutex<RealQuotaCell>,
+    _now_ms: u64,
+) -> Vec<crate::quota::QuotaState> {
+    let guard = cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some((u, at)) = guard.usage.as_ref() else { return local };
+    if at.elapsed().as_secs() >= TTL_SECS { return local; }
+    for q in local.iter_mut().filter(|q| q.provider == crate::event::AgentKind::Claude) {
+        q.window_5h_percent = Some(u.five_hour_pct.round().clamp(0.0, 100.0) as u8);
+        q.weekly_percent = Some(u.seven_day_pct.round().clamp(0.0, 100.0) as u8);
+        q.weekly_sonnet_percent = u.seven_day_sonnet_pct.map(|p| p.round().clamp(0.0, 100.0) as u8);
+        q.reset_at_ms = Some(u.five_hour_resets_ms);
+        q.weekly_reset_at_ms = Some(u.seven_day_resets_ms);
+        q.reset_estimated = false;
+        q.source = crate::quota::QuotaSource::RealApi;
+        q.freshness_ms = u.fetched_at_ms;
+    }
+    local
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,5 +441,48 @@ mod tests {
         h.join().unwrap();
         // 连不上（端口已关）
         assert!(matches!(fetch("http://127.0.0.1:1/x", &AccessToken::new("t".into()), 0), FetchOutcome::Failed));
+    }
+
+    fn local_state() -> crate::quota::QuotaState {
+        crate::quota::QuotaState {
+            provider: crate::event::AgentKind::Claude,
+            window_5h_percent: None, weekly_percent: None,
+            reset_at_ms: Some(1), reset_estimated: true,
+            observed_tokens_this_window: 12345, burn_rate_per_min: 9.5,
+            source: crate::quota::QuotaSource::LocalEstimate, freshness_ms: 100,
+            weekly_sonnet_percent: None, weekly_reset_at_ms: None,
+        }
+    }
+    fn usage() -> RealUsage {
+        RealUsage { five_hour_pct: 62.4, five_hour_resets_ms: 111, seven_day_pct: 31.0,
+                    seven_day_resets_ms: 222, seven_day_sonnet_pct: Some(10.0), fetched_at_ms: 999 }
+    }
+
+    #[test]
+    fn merge_overlays_fresh_real_and_keeps_local_observed() {
+        let cell = std::sync::Mutex::new(RealQuotaCell { usage: Some((usage(), std::time::Instant::now())) });
+        let out = merge(vec![local_state()], &cell, 0);
+        let q = &out[0];
+        assert_eq!(q.window_5h_percent, Some(62));
+        assert_eq!(q.weekly_percent, Some(31));
+        assert_eq!(q.weekly_sonnet_percent, Some(10));
+        assert_eq!((q.reset_at_ms, q.weekly_reset_at_ms), (Some(111), Some(222)));
+        assert!(!q.reset_estimated);
+        assert!(matches!(q.source, crate::quota::QuotaSource::RealApi));
+        assert_eq!(q.freshness_ms, 999);
+        assert_eq!(q.observed_tokens_this_window, 12345, "本地观测保留");
+        assert!((q.burn_rate_per_min - 9.5).abs() < f64::EPSILON, "burn 保留");
+    }
+
+    #[test]
+    fn merge_expired_ttl_leaves_local_untouched() {
+        let stale = std::time::Instant::now() - std::time::Duration::from_secs(TTL_SECS + 1);
+        let cell = std::sync::Mutex::new(RealQuotaCell { usage: Some((usage(), stale)) });
+        let out = merge(vec![local_state()], &cell, 0);
+        assert!(matches!(out[0].source, crate::quota::QuotaSource::LocalEstimate));
+        assert_eq!(out[0].window_5h_percent, None, "过期绝不渲染假百分比");
+        let empty = std::sync::Mutex::new(RealQuotaCell::default());
+        let out = merge(vec![local_state()], &empty, 0);
+        assert!(matches!(out[0].source, crate::quota::QuotaSource::LocalEstimate));
     }
 }
