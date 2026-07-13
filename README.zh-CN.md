@@ -35,9 +35,9 @@ tfa 由一个小型 daemon + 一组 agent hooks + 一个后台 scanner 组成：
 - macOS，桌面通知渠道需要（`terminal-notifier` 或 `osascript`）——
   见下方 [通知](#通知m3) 一节。tfa 其余部分（daemon、hooks、scanner、
   TUI、tmux/HTTP 通知渠道）只用到跨平台的东西（Unix socket、`tmux`、
-  `ps`），理论上可以在 Linux 上跑，但目前开发和测试都只在 macOS 上
-  做过——请把 Linux 当作「未测试」，尤其桌面通知在 Linux 上目前会静默
-  不生效（还没实现 `notify-send` 渠道）。
+  `ps`），完整测试套件（含 tmux e2e）在 CI 的 Linux 上全绿——不过日常
+  开发在 macOS 上进行，且桌面通知在 Linux 上目前会静默不生效（还没实现
+  `notify-send` 渠道）。
 
 ### 1. 克隆并编译
 

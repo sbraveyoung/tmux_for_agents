@@ -43,10 +43,11 @@ tfa is a small daemon + a set of agent hooks + a background scanner:
 - macOS, for the desktop-notification channel (`terminal-notifier` or
   `osascript`) — see [Notifications](#notifications-m3) below. The rest
   of tfa (daemon, hooks, scanner, TUI, tmux/HTTP notification channels)
-  uses only portable pieces (Unix sockets, `tmux`, `ps`) and should run
-  on Linux, but development and testing so far have been macOS-only —
-  treat Linux as untested, and expect desktop notifications specifically
-  to be a silent no-op there until someone adds a `notify-send` channel.
+  uses only portable pieces (Unix sockets, `tmux`, `ps`) and the full
+  test suite (including the tmux e2e tests) runs green on Linux in CI —
+  though day-to-day development happens on macOS, and desktop
+  notifications specifically are a silent no-op on Linux until someone
+  adds a `notify-send` channel.
 
 ### 1. Clone and build
 
