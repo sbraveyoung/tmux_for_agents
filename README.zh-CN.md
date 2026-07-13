@@ -5,10 +5,9 @@
 面向 tmux 的 AI coding agent 可观测性工具：谁在工作、谁在等你、谁已经
 完成——状态栏里一眼看到；想看细节时还有一个完整的交互式仪表盘。
 
-tfa 由一个小型 daemon + 一组 agent hooks + 一个后台 scanner 组成：
-
 ![tfa tui — interactive dashboard](docs/assets/tfa-tui.png)
 
+tfa 由一个小型 daemon + 一组 agent hooks + 一个后台 scanner 组成：
 - **hooks** 在 Claude Code 生命周期事件发生的瞬间（会话开始、提交了
   prompt、等待你输入、结束、使用工具）就上报给本地 daemon；
 - **后台 scanner** 直接读取 agent 的会话记录/状态（Claude Code 的
