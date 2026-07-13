@@ -117,9 +117,50 @@ impl Config {
             .map(|s| Self::from_toml_str(&s))
             .unwrap_or_default()
     }
-    /// 坏 toml → 默认（不 panic）。
+
+    /// 分段容错解析（tech-debt fix，2026-07-13）：整份 TOML 先只解析成
+    /// `toml::Value`（只做语法检查，不关心字段类型）；语法都过不了 → 保留
+    /// 老行为（全默认），但 eprintln 一行警告（daemon/tui 的 stderr 可见，
+    /// 不是硬失败也不是完全沉默）。语法通过之后，notify/quota/tui 三个
+    /// 顶层段各自独立 `try_into` 成对应的类型：一段字段类型不对（比如
+    /// `[tui] color = "yes"`），只有那一段 eprintln 警告 + 回退那一段的
+    /// 默认值，不牵连其它段——以前是整份 `toml::from_str::<Config>()` 一次
+    /// 性反序列化，任何一段炸了 `unwrap_or_default()` 就把全部三段都重置，
+    /// 一个 `[tui]` 手滑能把用户的 notify http url 也一起吃掉。
+    /// 段本身缺失（不是「出现但类型错」）→ 静默用该段默认，语义不变。
     pub fn from_toml_str(s: &str) -> Self {
-        toml::from_str(s).unwrap_or_default()
+        let value: toml::Value = match s.parse() {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("tfa: config.toml has invalid TOML syntax, using defaults: {e}");
+                return Self::default();
+            }
+        };
+        let table = match value {
+            toml::Value::Table(t) => t,
+            _ => toml::Table::default(),
+        };
+        Self {
+            notify: Self::parse_section(&table, "notify"),
+            quota: Self::parse_section(&table, "quota"),
+            tui: Self::parse_section(&table, "tui"),
+        }
+    }
+
+    /// 单段 salvage：段缺失 → 静默用 `T::default()`（沿用既有语义）；段存在
+    /// 但反序列化失败 → eprintln 警告（点名是哪一段）+ 该段默认，不影响
+    /// 其它顶层段——这就是「一段炸只炸一段」的落地点。
+    fn parse_section<T>(table: &toml::Table, key: &str) -> T
+    where
+        T: Default + serde::de::DeserializeOwned,
+    {
+        match table.get(key) {
+            None => T::default(),
+            Some(v) => v.clone().try_into::<T>().unwrap_or_else(|e| {
+                eprintln!("tfa: config [{key}] section is invalid, using defaults for that section: {e}");
+                T::default()
+            }),
+        }
     }
 }
 
@@ -237,5 +278,76 @@ done = true
 start = "23:00"
 "#);
         assert!(c.notify.triggers.done, "quiet_hours 部分表不应把整个 config 打回默认");
+    }
+
+    #[test]
+    fn bad_tui_section_falls_back_alone_notify_section_survives() {
+        // tech-debt fix（2026-07-13）：[tui] 一个类型错误（color 应为 bool，
+        // 这里给了字符串）不该把同一份文件里合法的 [notify] http url 也
+        // 一起打回默认——per-section salvage：每段独立 try_into，一段炸只
+        // 影响那一段。
+        let c = Config::from_toml_str(
+            r#"
+[notify.channels.http]
+enabled = true
+url = "http://192.168.1.9:8080/devkey"
+format = "ntfy"
+[tui]
+color = "notabool"
+"#,
+        );
+        assert!(c.notify.channels.http.enabled, "[tui] 类型错误不该连累 [notify]");
+        assert_eq!(c.notify.channels.http.url, "http://192.168.1.9:8080/devkey");
+        assert_eq!(c.notify.channels.http.format, "ntfy");
+        assert!(!c.tui.color, "[tui] 段自身类型错误 → 该段回退默认（color 默认 false）");
+        assert!(c.tui.state_colors.is_empty());
+        assert_eq!(c.tui.lang, "auto");
+    }
+
+    #[test]
+    fn bad_notify_section_falls_back_alone_tui_and_quota_survive() {
+        // 反过来验证同一粒度：坏的是 [notify]，合法的 [tui]/[quota] 不受影响。
+        let c = Config::from_toml_str(
+            r#"
+[notify]
+enabled = "notabool"
+[tui]
+color = true
+[quota]
+burn_rate_window_mins = 30
+"#,
+        );
+        assert!(c.notify.enabled, "[notify] 类型错误 → 该段回退默认（enabled 默认 true）");
+        assert!(c.tui.color, "[notify] 类型错误不该连累 [tui]");
+        assert_eq!(c.quota.burn_rate_window_mins, 30, "[notify] 类型错误不该连累 [quota]");
+    }
+
+    #[test]
+    fn full_file_syntax_error_still_falls_back_to_all_defaults() {
+        // 语法错（不是「某段类型不对」，是整份 toml 解析不出 Value）：连
+        // per-section salvage 都无从下手，必须退回全默认——不panic、不半解析。
+        let c = Config::from_toml_str("this is not : valid = toml = [");
+        assert!(c.notify.enabled);
+        assert!(c.notify.channels.tmux.enabled && c.notify.channels.macos.enabled);
+        assert!(!c.notify.channels.http.enabled);
+        assert!(!c.tui.color);
+        assert_eq!(c.tui.lang, "auto");
+        assert_eq!(c.quota.burn_rate_window_mins, 60);
+    }
+
+    #[test]
+    fn absent_sections_still_default_silently() {
+        // 段整个没出现（不是「出现但类型错」）：沿用既有语义——静默默认，
+        // 不应该触发任何「段无效」的路径（这里没有 stderr 断言，只断言值；
+        // eprintln 的 silent-vs-warn 区分靠人工用 `tfa daemon`/`tfa tui`
+        // 实测验证，见 agent 报告）。
+        let c = Config::from_toml_str(r#"
+[notify.triggers]
+done = true
+"#);
+        assert!(c.notify.triggers.done);
+        assert!(!c.tui.color);
+        assert_eq!(c.tui.lang, "auto");
+        assert_eq!(c.quota.burn_rate_window_mins, 60);
     }
 }

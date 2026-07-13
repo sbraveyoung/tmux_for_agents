@@ -181,7 +181,10 @@ waiting = "magenta"       # 支持 black/red/green/yellow/blue/magenta/cyan/whit
   `~/.codex/state_5.sqlite`）。
 - `TFA_CONFIG_PATH` — 覆盖配置文件路径（默认
   `~/.config/tfa/config.toml`）。daemon（以及 `tfa tui`）只在启动时读
-  一次；文件缺失或 TOML 格式错误一律静默落回默认值（绝不硬失败）。
+  一次。文件缺失 → 全部默认；TOML 语法错误同样落回全部默认（stderr 会打
+  一行警告）；类型错误如果只出在某一段（比如 `[tui] color = "yes"`），
+  只有那一段回退默认——同一份文件里其它合法的段（比如 `[notify]`）照常
+  生效，stderr 会点名是哪一段被跳过。绝不硬失败。
 
 测试/进阶用（正常使用不需要）：
 

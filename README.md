@@ -214,8 +214,12 @@ kept regardless of `color` (urgency shouldn't rely on color alone).
   database (default `~/.codex/state_5.sqlite`).
 - `TFA_CONFIG_PATH` — override the config file path (default
   `~/.config/tfa/config.toml`). The daemon (and `tfa tui`) reads this
-  once at startup; a missing file or bad TOML silently falls back to
-  defaults (never a hard error).
+  once at startup. A missing file means all defaults; a TOML syntax
+  error also falls back to all defaults (with a warning on stderr). A
+  type error confined to one section (e.g. `[tui] color = "yes"`)
+  only resets that section's defaults — other valid sections in the
+  same file (e.g. `[notify]`) still apply, and stderr names which
+  section was skipped. Never a hard error.
 
 Testing/advanced (not needed for normal use):
 
