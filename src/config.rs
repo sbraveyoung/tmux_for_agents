@@ -50,9 +50,26 @@ pub struct Triggers { pub waiting_input: bool, pub done: bool, pub stale: bool, 
 #[serde(default)]
 pub struct DisciplineConfig { pub cooldown_secs: u64, pub dead_debounce_ticks: u64, pub boot_grace_secs: u64 }
 
+/// `[quota]`：`burn_rate_window_mins` 为 M3 本地估算参数。其余为真实配额
+/// （2026-07-13 spec）：`real` 默认 false = 不 spawn fetcher、零 Keychain/网络
+/// （用户风险决策存档见 spec §2）；`refresh_secs` 使用侧钳 ≥300
+/// （`quota::real::effective_refresh_secs`）；alert_* 为 quota_alert 阈值，0=关。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub struct QuotaConfig { pub burn_rate_window_mins: u64 }
+pub struct QuotaConfig {
+    pub burn_rate_window_mins: u64,
+    pub real: bool,
+    pub refresh_secs: u64,
+    pub status_bar_percent: bool,
+    pub alert_5h: u8,
+    pub alert_7d: u8,
+}
+impl Default for QuotaConfig {
+    fn default() -> Self {
+        Self { burn_rate_window_mins: 60, real: false, refresh_secs: 600,
+               status_bar_percent: false, alert_5h: 85, alert_7d: 90 }
+    }
+}
 
 /// `tfa tui` 外观（2026-07-11 用户验收 Part2）：默认黑白（`color = false`），
 /// 显式开启后每状态可经 `state_colors` 按名覆盖内置调色板。纯数据结构——不依赖
@@ -107,7 +124,6 @@ impl Default for Triggers {
 impl Default for DisciplineConfig {
     fn default() -> Self { Self { cooldown_secs: 30, dead_debounce_ticks: 2, boot_grace_secs: 30 } }
 }
-impl Default for QuotaConfig { fn default() -> Self { Self { burn_rate_window_mins: 60 } } }
 
 impl Config {
     /// 读 config_path()，缺失/坏值→默认，绝不 panic。
@@ -349,5 +365,19 @@ done = true
         assert!(!c.tui.color);
         assert_eq!(c.tui.lang, "auto");
         assert_eq!(c.quota.burn_rate_window_mins, 60);
+    }
+
+    #[test]
+    fn quota_real_defaults_off_and_extended_fields_parse() {
+        let c = Config::from_toml_str("");
+        assert!(!c.quota.real, "real 默认必须是 false（零 API 承诺）");
+        assert_eq!(c.quota.refresh_secs, 600);
+        assert!(!c.quota.status_bar_percent);
+        assert_eq!((c.quota.alert_5h, c.quota.alert_7d), (85, 90));
+        let c = Config::from_toml_str("[quota]\nreal = true\nrefresh_secs = 120\nalert_5h = 70\n");
+        assert!(c.quota.real);
+        assert_eq!(c.quota.refresh_secs, 120, "原样存储，钳制在使用侧");
+        assert_eq!(c.quota.alert_5h, 70);
+        assert_eq!(c.quota.burn_rate_window_mins, 60, "旧字段不受影响");
     }
 }

@@ -99,6 +99,56 @@ pub fn parse_usage_response(body: &str, now_ms: u64) -> Option<RealUsage> {
     })
 }
 
+/// OAuth token 密封盒：Debug/Display 打码、无 Serialize——token 只允许经
+/// `secret()` 流向 HTTP Authorization 头（spec 全局约束「token 卫生」）。
+#[allow(dead_code)] // no production consumer yet; Task 3 fetcher constructs this via read_credentials
+pub struct AccessToken(String);
+impl AccessToken {
+    #[allow(dead_code)] // no production consumer yet; Task 3 fetcher's read_credentials chain calls this
+    pub fn new(s: String) -> Self { Self(s) }
+    #[allow(dead_code)] // no production consumer yet; Task 3 fetcher calls this to build the Authorization header
+    pub fn secret(&self) -> &str { &self.0 }
+}
+impl std::fmt::Debug for AccessToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("AccessToken(***)") }
+}
+impl std::fmt::Display for AccessToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("AccessToken(***)") }
+}
+
+#[allow(dead_code)] // no production consumer yet; Task 3 fetcher's read_credentials chain calls this
+pub fn parse_credentials_json(s: &str) -> Option<AccessToken> {
+    let v: serde_json::Value = serde_json::from_str(s).ok()?;
+    let tok = v.get("claudeAiOauth")?.get("accessToken")?.as_str()?;
+    (!tok.is_empty()).then(|| AccessToken::new(tok.to_string()))
+}
+
+/// 凭证链（spec §3.3）：Keychain → ~/.claude/.credentials.json → env。
+/// 任一环节失败静默走下一环；全失败 None（调用方按失败退避，绝不 panic）。
+#[allow(dead_code)] // no production consumer yet; Task 3 fetcher calls this each refresh cycle to obtain the token
+pub fn read_credentials() -> Option<AccessToken> {
+    let keychain = std::process::Command::new("security")
+        .args(["find-generic-password", "-a"])
+        .arg(std::env::var("USER").unwrap_or_default())
+        .args(["-s", "Claude Code-credentials", "-w"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| parse_credentials_json(s.trim()));
+    if keychain.is_some() { return keychain; }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+    if let Ok(s) = std::fs::read_to_string(home.join(".claude/.credentials.json")) {
+        if let Some(t) = parse_credentials_json(&s) { return Some(t); }
+    }
+    std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok().filter(|s| !s.is_empty()).map(AccessToken::new)
+}
+
+#[allow(dead_code)] // no production consumer yet; Task 3 fetcher uses this to schedule its poll interval
+pub fn effective_refresh_secs(cfg: &crate::config::QuotaConfig) -> u64 {
+    cfg.refresh_secs.max(300)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,5 +219,31 @@ mod tests {
     fn usage_response_rejects_malformed() {
         assert!(parse_usage_response("not json", 0).is_none());
         assert!(parse_usage_response(r#"{"five_hour":{}}"#, 0).is_none());
+    }
+
+    #[test]
+    fn access_token_never_leaks_via_debug_or_display() {
+        let t = AccessToken::new("sk-ant-oat01-SECRET".into());
+        assert_eq!(format!("{t:?}"), "AccessToken(***)");
+        assert_eq!(format!("{t}"), "AccessToken(***)");
+        assert_eq!(t.secret(), "sk-ant-oat01-SECRET");
+    }
+
+    #[test]
+    fn credentials_json_extracts_access_token() {
+        let j = r#"{"claudeAiOauth":{"accessToken":"tok123","refreshToken":"r","scopes":[]}}"#;
+        assert_eq!(parse_credentials_json(j).unwrap().secret(), "tok123");
+        assert!(parse_credentials_json("{}").is_none());
+        assert!(parse_credentials_json("junk").is_none());
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)] // brief's exact test fixture shape
+    fn refresh_secs_clamped_to_300_floor() {
+        let mut q = crate::config::QuotaConfig::default();
+        q.refresh_secs = 60;
+        assert_eq!(effective_refresh_secs(&q), 300);
+        q.refresh_secs = 900;
+        assert_eq!(effective_refresh_secs(&q), 900);
     }
 }
