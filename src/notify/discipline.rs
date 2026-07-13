@@ -53,7 +53,10 @@ fn local_now_min(now_ms: u64) -> u32 {
 /// 静默窗口是否应吞掉该 kind 的通知：quiet_hours 已配置、start/end 均合法解析、
 /// 当前本地时刻落在窗口内、且该 kind 不在 quiet_hours_exempt 白名单中。
 /// 任一前提不满足（含 start/end 解析失败）一律返回 false——绝不因坏配置误抑制。
-fn quiet_suppresses(cfg: &NotifyConfig, kind: NotifyKind, now_ms: u64) -> bool {
+/// pub(crate)：除 `edges()` 外，quota fetcher（`quota::real::spawn`）也用同一套决策
+/// 给 quota_alert 做 fetcher 侧静默门（spec §9 quiet_hours 不豁免 quota_alert，
+/// 2026-07-14）——复用同一份解析/跨夜窗口/豁免逻辑，不做第二处实现。
+pub(crate) fn quiet_suppresses(cfg: &NotifyConfig, kind: NotifyKind, now_ms: u64) -> bool {
     let Some(qh) = &cfg.quiet_hours else { return false };
     let Some(start_min) = parse_hm(&qh.start) else { return false };
     let Some(end_min) = parse_hm(&qh.end) else { return false };
@@ -300,6 +303,41 @@ mod tests {
         assert_eq!(parse_hm("25:00"), None, "小时越界");
         assert_eq!(parse_hm("12:60"), None, "分钟越界");
         assert_eq!(parse_hm("abc"), None, "非法格式");
+    }
+
+    #[test]
+    fn quiet_gate_decision_for_quota_alert() {
+        // quota fetcher 直接调用 quiet_suppresses 做 quota_alert 的静默门决策
+        // （quota_alert 不经 edges()，spec §9 的 quiet_hours 落地在 fetcher 侧）。
+        // 与下一个测试同一套确定性手法：窗口相对「当前本地时刻」构造，再把同一个
+        // now_ms 传进被测函数——任何运行时刻结果都确定，不依赖真实墙钟状态。
+        let now_ms = crate::daemon::now_ms();
+        let now_min = local_now_min(now_ms);
+        let fmt = |m: u32| format!("{:02}:{:02}", m / 60, m % 60);
+        let mut cfg = NotifyConfig::default(); // quiet_hours: None, exempt: ["dead"]
+
+        // 未配置 quiet_hours → 不抑制
+        assert!(!quiet_suppresses(&cfg, NotifyKind::QuotaAlert, now_ms), "quiet 未配置不得抑制");
+
+        // 配置了但当前时刻在窗口外（[now+2h, now+4h)，任何 now 都不含 now 本身）→ 不抑制
+        cfg.quiet_hours = Some(crate::config::QuietHours {
+            start: fmt((now_min + 120) % (24 * 60)),
+            end: fmt((now_min + 240) % (24 * 60)),
+        });
+        assert!(!quiet_suppresses(&cfg, NotifyKind::QuotaAlert, now_ms), "窗口外不得抑制");
+
+        // 窗口覆盖当前时刻 + quota_alert 不在默认豁免集（["dead"]）→ 抑制
+        cfg.quiet_hours = Some(crate::config::QuietHours {
+            start: fmt(now_min),
+            end: fmt((now_min + 120) % (24 * 60)),
+        });
+        assert!(quiet_suppresses(&cfg, NotifyKind::QuotaAlert, now_ms),
+                "静默窗口内、非豁免 → quota_alert 应被抑制");
+
+        // 用户显式把 "quota_alert" 加进豁免集 → 静默期照发
+        cfg.quiet_hours_exempt.push("quota_alert".to_string());
+        assert!(!quiet_suppresses(&cfg, NotifyKind::QuotaAlert, now_ms),
+                "豁免集包含 quota_alert 时不得抑制");
     }
 
     #[test]

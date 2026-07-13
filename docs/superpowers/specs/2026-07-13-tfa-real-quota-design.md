@@ -133,8 +133,13 @@ daemon ──spawn(仅当 config.quota.real)──► quota_real 线程
 - 阈值（config 可改）：`alert_5h = 85`、`alert_7d = 90`；设 0 = 关闭该窗告警。
 - **迟滞**：5h 窗 ≥85 触发一次后武装解除，回落 <80 重新武装（窗口每 5h 自然重置也会回落
   重武装）；7d 同理（≥90 触发，<85 重武装）。杜绝在阈值附近来回横跳轰炸。
-- 通知体走 M3 既有通道/quiet_hours/去重管线（`NotifyEvent kind="quota_alert"`），
-  quiet_hours **不豁免**（默认豁免集仍仅 `["dead"]`）。
+- 通知体走 M3 notifier 派发管线（`NotifyEvent kind="quota_alert"`；迟滞去重在 fetcher
+  侧的 `AlertArm`，不经 Discipline 的会话态边沿/冷却），quiet_hours **不豁免**
+  （默认豁免集仍仅 `["dead"]`）。
+  实现注记（2026-07-14）：quiet_hours 对 quota_alert 的落地方式 = **fetcher 侧冻结评估**
+  ——静默窗口内整体跳过 `AlertArm::evaluate`（含武装状态，决策复用
+  `discipline::quiet_suppresses`），而非 dispatch 侧丢弃；静默结束后阈值条件仍成立时，
+  下一轮拉取会补发。
 - 文案示例：`Claude 5h 窗口已用 87%，14:00 重置`（en/zh）。
 
 ## 10. config（`[quota]` 段扩展，缺省全等于现状）

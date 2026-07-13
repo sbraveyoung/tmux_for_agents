@@ -240,7 +240,11 @@ pub fn spawn(
         let mut token = read_credentials();
         let mut backoff = Backoff::new();
         loop {
-            let q = { cfg.lock().unwrap_or_else(std::sync::PoisonError::into_inner).quota.clone() };
+            // 每轮 config 快照：quota（阈值/间隔）+ notify（quiet_hours 静默门，见 Ok 分支）。
+            let (q, ncfg) = {
+                let c = cfg.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                (c.quota.clone(), c.notify.clone())
+            };
             if !q.real { return; } // 关=零 API 不变量的防未来保险：今天 config 不会热更（spawn 门已足够），但任何未来的热重载路径都不该让在跑的 fetcher 违约（review 2026-07-14 建议）
             let base = effective_refresh_secs(&q);
             let sleep_secs; // 每条路径都恰好赋值一次（见各 match 分支）；初值无意义故不预置，避免死存储警告
@@ -259,13 +263,22 @@ pub fn spawn(
                         // move 进 cell 后不能再借用的编译必然结果，不影响语义：evaluate
                         // 与写 cell 之间没有可观察的先后依赖（arm 只被本线程访问，
                         // 两步都在下一次 sleep 前完成）。
-                        for (kind, title, body) in arm.evaluate(q.alert_5h, q.alert_7d, &u) {
-                            let _ = tx.send(crate::notify::NotifyEvent {
-                                session_key: "quota:claude".into(),
-                                pane_id: String::new(),
-                                session_name: None,
-                                kind, title, body,
-                            });
+                        // quiet_hours 门（spec §9：quota_alert 不豁免；决策复用
+                        // discipline::quiet_suppresses，不第二处实现解析/跨夜/豁免逻辑）。
+                        // 静默期整体跳过评估（连武装状态都不动）：阈值在静默期被越过时，
+                        // 静默结束后的下一轮拉取仍会触发补发——比 dispatch 侧丢弃更符合
+                        // §9 意图（2026-07-14 实现注记）。
+                        let quiet = crate::notify::discipline::quiet_suppresses(
+                            &ncfg, crate::notify::NotifyKind::QuotaAlert, crate::daemon::now_ms());
+                        if !quiet {
+                            for (kind, title, body) in arm.evaluate(q.alert_5h, q.alert_7d, &u) {
+                                let _ = tx.send(crate::notify::NotifyEvent {
+                                    session_key: "quota:claude".into(),
+                                    pane_id: String::new(),
+                                    session_name: None,
+                                    kind, title, body,
+                                });
+                            }
                         }
                         cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
                             .usage = Some((u, std::time::Instant::now()));
