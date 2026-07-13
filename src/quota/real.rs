@@ -211,6 +211,8 @@ impl AlertArm {
         let mut out = Vec::new();
         let mut window = |fired: &mut bool, threshold: u8, pct: f64, label: &str, resets_ms: u64| {
             if threshold == 0 { return; }
+            // 权衡注记：阈值 1..=5 时 saturating_sub 把 rearm 带饱和为 0，而 pct 被钳
+            // ≥0 永远低不过它 → 该窗退化为一次性告警（对不现实配置有意如此；默认 85/90 不受影响）。
             let rearm = threshold.saturating_sub(5) as f64;
             if *fired && pct < rearm { *fired = false; }
             if !*fired && pct >= threshold as f64 {
