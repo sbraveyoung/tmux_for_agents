@@ -3,7 +3,6 @@
 //! （默认）时本模块除类型定义外的任何代码都不会被 daemon 触达。
 
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // no production consumer yet; Task 3 fetcher constructs it, Task 4 snapshot-merge consumes it
 pub struct RealUsage {
     pub five_hour_pct: f64,
     pub five_hour_resets_ms: u64,
@@ -15,7 +14,6 @@ pub struct RealUsage {
 
 /// Howard Hinnant days-from-civil：公历日期 → 距 1970-01-01 的天数。纯整数算术。
 /// 例：2026-03-27 → 20539 天；20539*86400 + 10*3600 = 1774605600（秒）。
-#[allow(dead_code)] // no production consumer yet; called by parse_iso8601_ms, which Task 3 fetcher wires in
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
@@ -28,7 +26,6 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 
 /// 解析接口用的 ISO8601 形态：`YYYY-MM-DDTHH:MM:SS[.fff...][Z|±HH:MM]` → epoch ms。
 /// 只服务本接口，不追求通用；任何不符即 None（调用方按解析失败退避，spec §6.5）。
-#[allow(dead_code)] // no production consumer yet; Task 3 fetcher calls this to parse resets_at
 pub fn parse_iso8601_ms(s: &str) -> Option<u64> {
     let b = s.as_bytes();
     if b.len() < 20 { return None; }
@@ -78,7 +75,6 @@ pub fn parse_iso8601_ms(s: &str) -> Option<u64> {
 
 /// 响应体 → RealUsage。容忍未知字段/缺席的 sonnet 窗（spec §3.2）；
 /// 必需窗缺失或形状不对 → None（调用方视为失败并退避）。
-#[allow(dead_code)] // no production consumer yet; Task 3 fetcher calls this on each poll response
 pub fn parse_usage_response(body: &str, now_ms: u64) -> Option<RealUsage> {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
     let win = |key: &str| -> Option<(f64, u64)> {
@@ -101,12 +97,9 @@ pub fn parse_usage_response(body: &str, now_ms: u64) -> Option<RealUsage> {
 
 /// OAuth token 密封盒：Debug/Display 打码、无 Serialize——token 只允许经
 /// `secret()` 流向 HTTP Authorization 头（spec 全局约束「token 卫生」）。
-#[allow(dead_code)] // no production consumer yet; Task 3 fetcher constructs this via read_credentials
 pub struct AccessToken(String);
 impl AccessToken {
-    #[allow(dead_code)] // no production consumer yet; Task 3 fetcher's read_credentials chain calls this
     pub fn new(s: String) -> Self { Self(s) }
-    #[allow(dead_code)] // no production consumer yet; Task 3 fetcher calls this to build the Authorization header
     pub fn secret(&self) -> &str { &self.0 }
 }
 impl std::fmt::Debug for AccessToken {
@@ -116,7 +109,6 @@ impl std::fmt::Display for AccessToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("AccessToken(***)") }
 }
 
-#[allow(dead_code)] // no production consumer yet; Task 3 fetcher's read_credentials chain calls this
 pub fn parse_credentials_json(s: &str) -> Option<AccessToken> {
     let v: serde_json::Value = serde_json::from_str(s).ok()?;
     let tok = v.get("claudeAiOauth")?.get("accessToken")?.as_str()?;
@@ -125,7 +117,6 @@ pub fn parse_credentials_json(s: &str) -> Option<AccessToken> {
 
 /// 凭证链（spec §3.3）：Keychain → ~/.claude/.credentials.json → env。
 /// 任一环节失败静默走下一环；全失败 None（调用方按失败退避，绝不 panic）。
-#[allow(dead_code)] // no production consumer yet; Task 3 fetcher calls this each refresh cycle to obtain the token
 pub fn read_credentials() -> Option<AccessToken> {
     let keychain = std::process::Command::new("security")
         .args(["find-generic-password", "-a"])
@@ -144,9 +135,119 @@ pub fn read_credentials() -> Option<AccessToken> {
     std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok().filter(|s| !s.is_empty()).map(AccessToken::new)
 }
 
-#[allow(dead_code)] // no production consumer yet; Task 3 fetcher uses this to schedule its poll interval
 pub fn effective_refresh_secs(cfg: &crate::config::QuotaConfig) -> u64 {
     cfg.refresh_secs.max(300)
+}
+
+/// 失败退避阶梯（spec §6.4）：10m→20m→40m→80m→2h 封顶；成功复位。
+/// 返回值与基础间隔取 max——退避绝不把节奏加快。
+pub struct Backoff { failures: u32 }
+impl Backoff {
+    pub fn new() -> Self { Self { failures: 0 } }
+    pub fn on_success(&mut self) { self.failures = 0; }
+    pub fn on_failure(&mut self) { self.failures = self.failures.saturating_add(1); }
+    pub fn delay_secs(&self, base: u64) -> u64 {
+        if self.failures == 0 { return base; }
+        let backoff = 600u64.saturating_mul(1 << (self.failures - 1).min(4)).min(7200);
+        backoff.max(base)
+    }
+}
+impl Default for Backoff { fn default() -> Self { Self::new() } }
+
+#[derive(Debug)]
+pub enum FetchOutcome {
+    Ok(RealUsage),
+    AuthFailed,
+    RateLimited { retry_after_secs: Option<u64> },
+    Failed,
+}
+
+pub const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+const FETCH_TIMEOUT_SECS: u64 = 5;
+
+/// 单次请求（spec §6.3：超时 5s；§3.1 头集合）。url 参数化以便 mock 测试。
+/// ureq 3.x：非 2xx 默认作 Err 返回——用 http_status_as_error(false) 统一拿状态码
+/// （以 channels.rs 现用 API 形态为准，编译不过时只调 builder 写法、行为不变）。
+pub fn fetch(url: &str, token: &AccessToken, now_ms: u64) -> FetchOutcome {
+    let config = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS)))
+        .build();
+    let agent: ureq::Agent = config.into();
+    let resp = agent.get(url)
+        .header("Authorization", &format!("Bearer {}", token.secret()))
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .header("Content-Type", "application/json")
+        .header("User-Agent", concat!("tfa/", env!("CARGO_PKG_VERSION")))
+        .call();
+    let mut resp = match resp { Ok(r) => r, Err(_) => return FetchOutcome::Failed };
+    match resp.status().as_u16() {
+        200..=299 => {}
+        401 | 403 => return FetchOutcome::AuthFailed,
+        429 => {
+            let retry_after_secs = resp.headers().get("retry-after")
+                .and_then(|v| v.to_str().ok()).and_then(|s| s.trim().parse().ok());
+            return FetchOutcome::RateLimited { retry_after_secs };
+        }
+        _ => return FetchOutcome::Failed,
+    }
+    let body = match resp.body_mut().read_to_string() { Ok(b) => b, Err(_) => return FetchOutcome::Failed };
+    match parse_usage_response(&body, now_ms) { Some(u) => FetchOutcome::Ok(u), None => FetchOutcome::Failed }
+}
+
+/// fetcher 与快照组装间的共享格子。Instant 是单调钟：TTL 判断不受 wall clock 影响。
+#[derive(Default)]
+pub struct RealQuotaCell {
+    pub usage: Option<(RealUsage, std::time::Instant)>,
+}
+
+/// fetcher 线程（spec §4）：仅 config.quota.real=true 时由 daemon spawn。
+/// 严格单飞：线程内串行 loop。alert 评估在 Task 6 接入（本任务 tx 仅占位持有）。
+pub fn spawn(
+    cell: std::sync::Arc<std::sync::Mutex<RealQuotaCell>>,
+    cfg: std::sync::Arc<std::sync::Mutex<crate::config::Config>>,
+    tx: std::sync::mpsc::Sender<crate::notify::NotifyEvent>,
+) {
+    std::thread::spawn(move || {
+        let _tx = tx; // Task 6 (quota_alert) 接入
+        let mut token = read_credentials();
+        let mut backoff = Backoff::new();
+        loop {
+            let q = { cfg.lock().unwrap_or_else(std::sync::PoisonError::into_inner).quota.clone() };
+            let base = effective_refresh_secs(&q);
+            let sleep_secs; // 每条路径都恰好赋值一次（见各 match 分支）；初值无意义故不预置，避免死存储警告
+            match &token {
+                None => {
+                    // 无凭证：按失败退避重试读取（用户可能稍后授权 Keychain）
+                    backoff.on_failure();
+                    sleep_secs = backoff.delay_secs(base);
+                    token = read_credentials();
+                }
+                Some(t) => match fetch(USAGE_URL, t, crate::daemon::now_ms()) {
+                    FetchOutcome::Ok(u) => {
+                        backoff.on_success();
+                        sleep_secs = backoff.delay_secs(base);
+                        cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .usage = Some((u, std::time::Instant::now()));
+                    }
+                    FetchOutcome::AuthFailed => {
+                        token = read_credentials(); // token 轮换自愈：重读一次
+                        backoff.on_failure();
+                        sleep_secs = backoff.delay_secs(base);
+                    }
+                    FetchOutcome::RateLimited { retry_after_secs } => {
+                        backoff.on_failure();
+                        sleep_secs = backoff.delay_secs(base).max(retry_after_secs.unwrap_or(0));
+                    }
+                    FetchOutcome::Failed => {
+                        backoff.on_failure();
+                        sleep_secs = backoff.delay_secs(base);
+                    }
+                },
+            }
+            std::thread::sleep(std::time::Duration::from_secs(sleep_secs));
+        }
+    });
 }
 
 #[cfg(test)]
@@ -245,5 +346,71 @@ mod tests {
         assert_eq!(effective_refresh_secs(&q), 300);
         q.refresh_secs = 900;
         assert_eq!(effective_refresh_secs(&q), 900);
+    }
+
+    #[test]
+    fn backoff_ladder_10m_to_2h_cap_and_reset() {
+        let mut b = Backoff::new();
+        assert_eq!(b.delay_secs(600), 600, "无失败=正常间隔");
+        b.on_failure();
+        assert_eq!(b.delay_secs(600), 600, "第 1 次失败=10m");
+        b.on_failure();
+        assert_eq!(b.delay_secs(600), 1200);
+        b.on_failure();
+        assert_eq!(b.delay_secs(600), 2400);
+        b.on_failure(); b.on_failure(); b.on_failure();
+        assert_eq!(b.delay_secs(600), 7200, "封顶 2h");
+        b.on_success();
+        assert_eq!(b.delay_secs(600), 600, "成功复位");
+        // 基础间隔大于退避值时取大者（用户配了 3600 就不该被退避降到更小）
+        let mut b = Backoff::new();
+        b.on_failure();
+        assert_eq!(b.delay_secs(3600), 3600);
+    }
+
+    /// 一次性 mock HTTP server：接受 1 个连接，回写给定响应，返回 (url, join)。
+    fn mock_http(status_line: &'static str, extra_headers: &'static str, body: &'static str) -> (String, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/api/oauth/usage", listener.local_addr().unwrap());
+        let h = std::thread::spawn(move || {
+            if let Ok((mut s, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf); // 读掉请求头，不解析
+                let resp = format!("{status_line}\r\n{extra_headers}content-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+        (url, h)
+    }
+
+    #[test]
+    fn fetch_ok_parses_real_usage() {
+        let body = r#"{"five_hour":{"utilization":62.0,"resets_at":"2026-03-27T10:00:00Z"},"seven_day":{"utilization":31.0,"resets_at":"2026-04-02T13:00:00Z"}}"#;
+        let (url, h) = mock_http("HTTP/1.1 200 OK", "content-type: application/json\r\n", body);
+        let out = fetch(&url, &AccessToken::new("t".into()), 7);
+        h.join().unwrap();
+        match out {
+            FetchOutcome::Ok(u) => { assert!((u.five_hour_pct - 62.0).abs() < f64::EPSILON); assert_eq!(u.fetched_at_ms, 7); }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fetch_maps_auth_rate_limit_and_garbage() {
+        let (url, h) = mock_http("HTTP/1.1 401 Unauthorized", "", "{}");
+        assert!(matches!(fetch(&url, &AccessToken::new("t".into()), 0), FetchOutcome::AuthFailed));
+        h.join().unwrap();
+        let (url, h) = mock_http("HTTP/1.1 429 Too Many Requests", "retry-after: 120\r\n", "{}");
+        match fetch(&url, &AccessToken::new("t".into()), 0) {
+            FetchOutcome::RateLimited { retry_after_secs } => assert_eq!(retry_after_secs, Some(120)),
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+        h.join().unwrap();
+        let (url, h) = mock_http("HTTP/1.1 200 OK", "", "not json");
+        assert!(matches!(fetch(&url, &AccessToken::new("t".into()), 0), FetchOutcome::Failed));
+        h.join().unwrap();
+        // 连不上（端口已关）
+        assert!(matches!(fetch("http://127.0.0.1:1/x", &AccessToken::new("t".into()), 0), FetchOutcome::Failed));
     }
 }

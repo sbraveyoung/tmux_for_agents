@@ -3,6 +3,7 @@ use crate::event::AgentEvent;
 use crate::notify::discipline::Discipline;
 use crate::notify::NotifyEvent;
 use crate::protocol::{Request, Response};
+use crate::quota::real::RealQuotaCell;
 use crate::quota::QuotaCache;
 use crate::state::StateStore;
 use std::io::{BufRead, BufReader, Write};
@@ -20,6 +21,7 @@ pub fn serve(
     config: Arc<Mutex<Config>>,
     discipline: Arc<Mutex<Discipline>>,
     tx: Sender<NotifyEvent>,
+    _real_quota: Arc<Mutex<RealQuotaCell>>, // Task 4 接线：快照组装时读取并合并进 QuotaState
 ) {
     for conn in listener.incoming() {
         let Ok(stream) = conn else { continue };
