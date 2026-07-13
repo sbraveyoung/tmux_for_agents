@@ -241,6 +241,9 @@ pub fn spawn(
         let mut arm = AlertArm::default();
         let mut token = read_credentials();
         let mut backoff = Backoff::new();
+        // 首轮跳过 None 分支的重读（见下方）：`token` 刚在上面读过一次，
+        // 避免启动时背靠背触发两次 `security`/两次可能的 Keychain 授权弹框（review 2026-07-14）。
+        let mut first_iteration = true;
         loop {
             // 每轮 config 快照：quota（阈值/间隔）+ notify（quiet_hours 静默门，见 Ok 分支）。
             let (q, ncfg) = {
@@ -252,10 +255,15 @@ pub fn spawn(
             let sleep_secs; // 每条路径都恰好赋值一次（见各 match 分支）；初值无意义故不预置，避免死存储警告
             match &token {
                 None => {
-                    // 无凭证：按失败退避重试读取（用户可能稍后授权 Keychain）
+                    // 无凭证：按失败退避重试读取（用户可能稍后授权 Keychain）。
+                    // 首轮不重读——线程刚启动时已经读过一次（上方 `let mut token = read_credentials()`），
+                    // 这里若再读会与启动读背靠背连打两次 `security`；从第二轮起才真正重读，
+                    // 此时距启动读已经过了至少一个退避间隔（review 2026-07-14）。
                     backoff.on_failure();
                     sleep_secs = backoff.delay_secs(base);
-                    token = read_credentials();
+                    if !first_iteration {
+                        token = read_credentials();
+                    }
                 }
                 Some(t) => match fetch(USAGE_URL, t, crate::daemon::now_ms()) {
                     FetchOutcome::Ok(u) => {
@@ -300,6 +308,7 @@ pub fn spawn(
                     }
                 },
             }
+            first_iteration = false;
             std::thread::sleep(std::time::Duration::from_secs(sleep_secs));
         }
     });

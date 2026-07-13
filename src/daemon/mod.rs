@@ -74,14 +74,17 @@ pub fn run() -> anyhow::Result<()> {
         Arc::clone(&config), Arc::clone(&discipline), notify_tx.clone(),
     );
 
+    let listener = UnixListener::bind(&sock_path)?;
+
     // 真实配额 fetcher：仅 config.quota.real=true 时 spawn（默认关闭=零 Keychain/网络，spec §6.1）。
     // cell 无论是否开启都建好并传给 server（Task 4 接线用；关闭时 cell 恒为 None，快照合并阶段自然跳过）。
+    // spawn 放在 bind 成功之后：bind 失败（如遗留 socket/权限问题）时进程经上面的 `?` 直接退出，
+    // 不该在退出前就已经打过一次 Keychain（review 2026-07-14）。
     let real_quota = Arc::new(Mutex::new(crate::quota::real::RealQuotaCell::default()));
     if config.lock().unwrap_or_else(std::sync::PoisonError::into_inner).quota.real {
         crate::quota::real::spawn(Arc::clone(&real_quota), Arc::clone(&config), notify_tx.clone());
     }
 
-    let listener = UnixListener::bind(&sock_path)?;
     server::serve(listener, store, dirty, quota, config, discipline, notify_tx, real_quota); // 阻塞 accept 循环
     Ok(())
 }

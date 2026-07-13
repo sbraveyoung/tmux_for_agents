@@ -330,6 +330,11 @@ threshold fires exactly one notification through the channels
 configured below (not a repeat storm), and it only re-arms once usage
 falls back below `threshold - 5`%.
 
+Quota alerts also respect the quiet hours below: they're suppressed
+while the window is active and fire on the next poll after it ends if
+still above threshold, unless exempted via `quiet_hours_exempt =
+["quota_alert"]`.
+
 ## Notifications (M3)
 
 tfa can proactively notify you — desktop notification, tmux status
@@ -343,7 +348,7 @@ via tmux + macOS, everything else off).
 ```toml
 [notify]
 enabled = true
-# Optional quiet hours: silence waiting_input/done/stale in this window.
+# Optional quiet hours: silence waiting_input/done/stale/quota_alert in this window.
 # `dead` always gets through (a real crash should never be swallowed).
 # quiet_hours = { start = "23:00", end = "08:00" }
 # quiet_hours_exempt = ["dead"]   # default exempt set

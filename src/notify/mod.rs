@@ -29,7 +29,7 @@ impl NotifyKind {
 
 #[derive(Debug, Clone)]
 pub struct NotifyEvent {
-    #[allow(dead_code)] // read by Task 6 discipline's cooldown bookkeeping
+    #[allow(dead_code)] // kept for future per-key bookkeeping; constructed at all send sites, no reader yet (M3-era field)
     pub session_key: String,
     pub pane_id: String,
     pub session_name: Option<String>,
