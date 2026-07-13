@@ -46,6 +46,18 @@ fn run_switch(pane_id: &str, tfa_client: Option<&str>) -> Result<(), String> {
     }
 }
 
+/// 是否应该在首次尝试失败后，退化重试一次不带 `-c`——纯决策函数，从
+/// `navigate` 里摘出来是为了不需要真实 tmux 就能单测这四种组合（原先整个
+/// 决策埋在 `navigate` 的 match 分支里，只能靠真 tmux 集成测试才能覆盖到）。
+/// 只有「注入过 client 且首次尝试确实失败」才重试；没注入 client（`had_client
+/// = false`）说明本来就是单次尝试、无 `-c` 可退化；首次已经成功
+/// （`first_attempt_failed = false`）自然也不需要重试。语义见下面
+/// `navigate` 的 doc comment（spec §7.1「any behavior beats permanently
+/// broken」）。
+fn should_retry_without_client(had_client: bool, first_attempt_failed: bool) -> bool {
+    had_client && first_attempt_failed
+}
+
 /// 执行跳转。Ok(()) → 调用方退出 TUI（popup 随之关闭）；Err → 目标可能已死
 /// （≤1s 陈旧窗口），调用方留在 TUI 报错，等下一次快照自然纠正。
 ///
@@ -60,12 +72,13 @@ fn run_switch(pane_id: &str, tfa_client: Option<&str>) -> Result<(), String> {
 /// 天然正确；多 client 场景可能切错 client，但比「永久失效」好——参见 spec §7.1
 /// 「any behavior beats permanently broken」。只重试一次，不递归、不循环；
 /// `tfa_client` 为 `None`（未注入或已被 `sanitize_client` 拒绝）时行为不变——
-/// 单次尝试，不重试。
+/// 单次尝试，不重试。重试与否的判断见 `should_retry_without_client`。
 pub fn navigate(pane_id: &str, tfa_client: Option<&str>) -> Result<(), String> {
-    match run_switch(pane_id, tfa_client) {
-        Ok(()) => Ok(()),
-        Err(_) if tfa_client.is_some() => run_switch(pane_id, None),
-        Err(e) => Err(e),
+    let first = run_switch(pane_id, tfa_client);
+    if should_retry_without_client(tfa_client.is_some(), first.is_err()) {
+        run_switch(pane_id, None)
+    } else {
+        first
     }
 }
 
@@ -107,6 +120,29 @@ mod tests {
         let v = nav_argv(&["-L".into(), "testsock".into()], None, "%1");
         assert_eq!(&v[..3], &["tmux".to_string(), "-L".into(), "testsock".into()]);
         assert_eq!(v[3], "switch-client");
+    }
+
+    #[test]
+    fn retries_without_client_only_when_had_client_and_first_attempt_failed() {
+        // 四种组合穷举（tech-debt fix，2026-07-13）：之前这个决策埋在
+        // navigate 的 match 分支里，没有真实 tmux 就测不到；抽出来之后
+        // 纯函数四种组合直接单测，不需要起进程。
+        assert!(
+            should_retry_without_client(true, true),
+            "注入过 client 且首次失败 → 应该退化重试一次不带 -c"
+        );
+        assert!(
+            !should_retry_without_client(true, false),
+            "注入过 client 但首次已经成功 → 不该多此一举再跑一次"
+        );
+        assert!(
+            !should_retry_without_client(false, true),
+            "没注入 client（None，或被 sanitize_client 拒绝）→ 本来就是单次尝试，没有 -c 可退化"
+        );
+        assert!(
+            !should_retry_without_client(false, false),
+            "没 client 且首次成功 → 显然不重试"
+        );
     }
 
     #[test]
