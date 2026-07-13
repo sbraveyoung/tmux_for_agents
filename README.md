@@ -1,5 +1,7 @@
 English | [简体中文](README.zh-CN.md)
 
+[![CI](https://github.com/sbraveyoung/tmux_for_agents/actions/workflows/ci.yml/badge.svg)](https://github.com/sbraveyoung/tmux_for_agents/actions/workflows/ci.yml)
+
 # tfa — tmux for agents
 
 AI coding agent observability for tmux: who's working, who's waiting for

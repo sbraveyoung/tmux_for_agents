@@ -1,5 +1,7 @@
 [English](README.md) | 简体中文
 
+[![CI](https://github.com/sbraveyoung/tmux_for_agents/actions/workflows/ci.yml/badge.svg)](https://github.com/sbraveyoung/tmux_for_agents/actions/workflows/ci.yml)
+
 # tfa — tmux for agents
 
 面向 tmux 的 AI coding agent 可观测性工具：谁在工作、谁在等你、谁已经
