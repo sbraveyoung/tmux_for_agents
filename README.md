@@ -333,7 +333,7 @@ falls back below `threshold - 5`%.
 Quota alerts also respect the quiet hours below: they're suppressed
 while the window is active and fire on the next poll after it ends if
 still above threshold, unless exempted via `quiet_hours_exempt =
-["quota_alert"]`.
+["dead", "quota_alert"]`.
 
 ## Notifications (M3)
 
