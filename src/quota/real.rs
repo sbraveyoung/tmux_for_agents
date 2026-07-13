@@ -214,6 +214,7 @@ pub fn spawn(
         let mut backoff = Backoff::new();
         loop {
             let q = { cfg.lock().unwrap_or_else(std::sync::PoisonError::into_inner).quota.clone() };
+            if !q.real { return; } // 关=零 API 不变量的防未来保险：今天 config 不会热更（spawn 门已足够），但任何未来的热重载路径都不该让在跑的 fetcher 违约（review 2026-07-14 建议）
             let base = effective_refresh_secs(&q);
             let sleep_secs; // 每条路径都恰好赋值一次（见各 match 分支）；初值无意义故不预置，避免死存储警告
             match &token {
