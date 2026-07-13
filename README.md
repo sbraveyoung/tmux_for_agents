@@ -6,6 +6,8 @@ AI coding agent observability for tmux: who's working, who's waiting for
 you, who's done — in your status bar, and in a full interactive
 dashboard when you want the details.
 
+![tfa tui — interactive dashboard](docs/assets/tfa-tui.png)
+
 tfa is a small daemon + a set of agent hooks + a background scanner:
 
 - **hooks** report Claude Code lifecycle events (session start, prompt
