@@ -1,4 +1,5 @@
 pub mod burn;
+pub mod real;
 
 use crate::event::AgentKind;
 use burn::BurnSampler;
