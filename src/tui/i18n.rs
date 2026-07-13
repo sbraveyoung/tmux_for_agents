@@ -49,6 +49,12 @@ pub struct Texts {
     pub label_window: &'static str,
     pub label_usage_5h: &'static str,
     pub label_local_est: &'static str,
+    // 真实配额详情行（2026-07-14）：与 label_local_est 对称的「真实来源」标签；
+    // label_quota 是该行的前缀词（label_usage_5h 语义是「5h 窗口用量」，跟三窗口
+    // 汇总行不搭）；label_reset 拼在每个窗口的本地重置时刻前面。
+    pub label_quota: &'static str,
+    pub label_real_source: &'static str,
+    pub label_reset: &'static str,
 
     // Footer
     pub footer_keys: &'static str,
@@ -97,6 +103,9 @@ pub static ZH: Texts = Texts {
     label_window: "窗口",
     label_usage_5h: "用量(5h窗)",
     label_local_est: "本地估算",
+    label_quota: "配额",
+    label_real_source: "真实",
+    label_reset: "重置",
 
     footer_keys: "↑↓/jk 选  ⏎ 跳转  q 退出 · 1s 刷新",
     connected: "已连接",
@@ -140,6 +149,9 @@ pub static EN: Texts = Texts {
     label_window: "window",
     label_usage_5h: "usage(5h win)",
     label_local_est: "local est",
+    label_quota: "quota",
+    label_real_source: "real",
+    label_reset: "resets",
 
     footer_keys: "↑↓/jk select  ⏎ jump  q quit · 1s refresh",
     connected: "connected",

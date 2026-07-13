@@ -3,6 +3,7 @@
 //! 主体 ≥100 列左右两栏(60/40)，否则上下两栏；过小则纯列表降级。
 
 use crate::config::TuiConfig;
+use crate::quota::{QuotaSource, QuotaState};
 use crate::state::{AgentSession, ContextUsage, SessionState, Source};
 use crate::tui::i18n::Texts;
 use crate::tui::model::{Model, NavError};
@@ -82,14 +83,34 @@ fn header_line(model: &Model) -> Line<'static> {
         Span::styled(" ", bold),
         Span::raw(format!("💀{dead}")),
     ];
-    let mut burn = String::new();
+    // 真实配额任务（2026-07-14）：RealApi 且已带 5h 百分比的条目改显示
+    // "5h 62%·7d 31%"（真实数据，burn 速率不再有意义，挪去详情栏也不重复展示）；
+    // 其余条目（LocalEstimate，或 RealApi 但百分比尚未就绪的过渡态）维持原样
+    // burn 文案——LocalEstimate 视觉形态零变化（header_keeps_burn_for_local_estimate 钉住）。
+    let mut quota_seg = String::new();
     for q in &model.quota {
-        burn.push_str(&format!("  ·  {} {:.0} tok/min", q.provider.label(), q.burn_rate_per_min));
+        match real_5h_percent(q) {
+            Some(p5) => {
+                let p7 = q.weekly_percent.map(|p| p.to_string()).unwrap_or_else(|| "--".into());
+                quota_seg.push_str(&format!("  ·  {} 5h {p5}%·7d {p7}%", q.provider.label()));
+            }
+            None => quota_seg.push_str(&format!("  ·  {} {:.0} tok/min", q.provider.label(), q.burn_rate_per_min)),
+        }
     }
-    if !burn.is_empty() {
-        spans.push(Span::raw(burn));
+    if !quota_seg.is_empty() {
+        spans.push(Span::raw(quota_seg));
     }
     Line::from(spans)
+}
+
+/// `source == RealApi` 且已带真实 5h 百分比 → `Some(p)`；否则（`LocalEstimate`，
+/// 或防御性地 `RealApi` 但 `window_5h_percent` 尚未就绪的过渡态）一律 `None`，
+/// 落回本地估算展示。header 与详情栏共用同一判定，避免两处分叉出不一致的显示态。
+fn real_5h_percent(q: &QuotaState) -> Option<u8> {
+    match q.source {
+        QuotaSource::RealApi => q.window_5h_percent,
+        QuotaSource::LocalEstimate => None,
+    }
 }
 
 fn footer_line(model: &Model, texts: &Texts) -> Line<'static> {
@@ -223,14 +244,19 @@ fn draw_detail(f: &mut Frame, area: Rect, model: &Model, styles: &StateStyles, t
         window
     )));
     if let Some(q) = model.quota.iter().find(|q| q.provider == s.agent) {
-        // 本地估算无真实 limit：observed 带 ≥ 前缀诚实标注，percent 恒缺省（与 tfa list 一致）
-        lines.push(Line::from(format!(
-            "{}: ≥{} · {:.1} tok/min · {}",
-            texts.label_usage_5h,
-            fmt_tokens(q.observed_tokens_this_window),
-            q.burn_rate_per_min,
-            texts.label_local_est
-        )));
+        match real_5h_percent(q) {
+            Some(_) => lines.push(Line::from(fmt_quota_real_line(texts, q, model.generated_at_ms))),
+            None => {
+                // 本地估算无真实 limit：observed 带 ≥ 前缀诚实标注，percent 恒缺省（与 tfa list 一致）
+                lines.push(Line::from(format!(
+                    "{}: ≥{} · {:.1} tok/min · {}",
+                    texts.label_usage_5h,
+                    fmt_tokens(q.observed_tokens_this_window),
+                    q.burn_rate_per_min,
+                    texts.label_local_est
+                )));
+            }
+        }
     }
     f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
 }
@@ -467,6 +493,42 @@ pub fn fmt_ctx(texts: &Texts, c: Option<&ContextUsage>) -> String {
     }
 }
 
+/// epoch ms → 本地时区 HH:MM（详情栏重置时刻）。libc 本地时——与 quiet_hours 同源做法
+/// （`notify::discipline::local_now_min`，2026-07-14 复用同一套 `localtime_r` 手法）。
+pub fn fmt_local_hm(ms: u64) -> String {
+    let secs = (ms / 1000) as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::localtime_r(&secs, &mut tm);
+    }
+    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+}
+
+/// 详情栏真实配额行：三窗口百分比（5h/7d，sonnet 缺省整段省略）+ 各自本地重置
+/// 时刻（`fmt_local_hm`）+ 数据来源标签 + 数据新鲜度。年龄走既有 `fmt_duration`
+/// （`generated_at_ms - freshness_ms`），不新造一套「n 分钟前」文案——与「已持续」
+/// 「等 21m」等既有时长展示同一套单位习惯，即使在 ZH 文案里也不翻译单位字母
+/// （项目既有约定，见 `label_usage_5h` 的 ZH 值 "用量(5h窗)" 本身就混着 "5h"）。
+/// 调用方已确认 `real_5h_percent(q).is_some()`，这里只管格式化。
+fn fmt_quota_real_line(texts: &Texts, q: &QuotaState, generated_at_ms: u64) -> String {
+    let p5 = q.window_5h_percent.map(|p| p.to_string()).unwrap_or_else(|| "--".into());
+    let p7 = q.weekly_percent.map(|p| p.to_string()).unwrap_or_else(|| "--".into());
+    let r5 = fmt_reset_suffix(texts, q.reset_at_ms);
+    let r7 = fmt_reset_suffix(texts, q.weekly_reset_at_ms);
+    let sonnet = q.weekly_sonnet_percent.map(|p| format!(" · sonnet {p}%")).unwrap_or_default();
+    let age = fmt_duration(generated_at_ms.saturating_sub(q.freshness_ms));
+    let quota = texts.label_quota;
+    let real = texts.label_real_source;
+    let ago = texts.ago_suffix;
+    format!("{quota}: 5h {p5}%{r5} · 7d {p7}%{r7}{sonnet} · {real} · {age}{ago}")
+}
+
+/// `Some(ms)` → ` ({label_reset} HH:MM)`（本地时区，`fmt_local_hm`）；`None` → 空串
+/// （真实来源理论上 reset_at_ms 恒有值，防御式兜底不假造时间）。
+fn fmt_reset_suffix(texts: &Texts, ms: Option<u64>) -> String {
+    ms.map(|ms| format!(" ({} {})", texts.label_reset, fmt_local_hm(ms))).unwrap_or_default()
+}
+
 pub fn model_short(m: &str) -> String {
     truncate_chars(m.strip_prefix("claude-").unwrap_or(m), 14)
 }
@@ -687,6 +749,15 @@ mod tests {
         assert_eq!(model_short("gpt-5.3-codex"), "gpt-5.3-codex");
         assert_eq!(truncate_chars("字".repeat(30).as_str(), 10).chars().count(), 11); // 10 + …
         assert_eq!(source_label(Source::Both), "hook+scan");
+    }
+
+    #[test]
+    fn fmt_local_hm_shape() {
+        // 真实机器时区各不相同，只钉「HH:MM」形状（2 位数字 + 冒号 + 2 位数字），
+        // 不钉具体值——精确到分钟的本地时刻断言在 CI 上会因时区而 flaky。
+        let s = fmt_local_hm(1_774_605_600_000);
+        assert_eq!(s.len(), 5);
+        assert!(s.as_bytes()[2] == b':' && s[..2].chars().all(|c| c.is_ascii_digit()));
     }
 
     #[test]
@@ -1033,6 +1104,49 @@ mod tests {
         assert!(text.contains("已连接"), "footer conn state:\n{text}");
         // 坐标未知（本测试夹具没设 window_index/pane_index）→ 详情栏窗口字段回落 —。
         assert!(text.contains("窗口: —"), "detail pane shows em-dash when coordinates unknown:\n{text}");
+    }
+
+    /// 真实配额任务（2026-07-14）：`source == RealApi` 且 `window_5h_percent` 有值时，
+    /// header 的 quota 段改显示 5h/7d 真实百分比，不再是本地估算的 burn 速率。
+    #[test]
+    fn header_shows_real_percents_when_source_is_real_api() {
+        let mut q = quota(340_000, 552.0);
+        q.window_5h_percent = Some(62);
+        q.weekly_percent = Some(31);
+        q.source = QuotaSource::RealApi;
+        let m = model_with(vec![sess("%1", Some("api"), SessionState::Working, 0)], vec![q], 0);
+        let text = render_text(&m, &StateStyles::default(), &ZH, 120, 30);
+        assert!(text.contains("claude 5h 62%·7d 31%"), "real header:\n{text}");
+        assert!(!text.contains("tok/min") || !text.contains("claude 552"), "burn 不再占 header：\n{text}");
+    }
+
+    /// 回归钉子：`source == LocalEstimate`（现状/默认）时 header 必须继续显示 burn
+    /// 速率，视觉形态零变化——这是本任务对 LocalEstimate 路径唯一的硬约束。
+    #[test]
+    fn header_keeps_burn_for_local_estimate() {
+        let m = model_with(vec![sess("%1", Some("api"), SessionState::Working, 0)], vec![quota(340_000, 552.0)], 0);
+        let text = render_text(&m, &StateStyles::default(), &ZH, 120, 30);
+        assert!(text.contains("552 tok/min"), "本地估算保持原样:\n{text}");
+    }
+
+    /// 详情栏真实态：三窗口（5h/7d/sonnet）百分比 + 数据来源标签，全部走 EN 文案表
+    /// 断言（来源标签英文单词 "real" 不会出现在 ZH 文案里，这里刻意用 EN 表校验
+    /// 生产渲染路径确实把 source 分支接上了，而不是仅仅新增了 i18n 字段却没接线）。
+    #[test]
+    fn detail_shows_three_windows_age_and_source() {
+        let mut q = quota(340_000, 9.5);
+        q.window_5h_percent = Some(62);
+        q.weekly_percent = Some(31);
+        q.weekly_sonnet_percent = Some(10);
+        q.reset_at_ms = Some(1_774_605_600_000);
+        q.weekly_reset_at_ms = Some(1_774_700_000_000);
+        q.source = QuotaSource::RealApi;
+        let m = model_with(vec![sess("%1", Some("api"), SessionState::Working, 0)], vec![q], 60_000);
+        let text = render_text(&m, &StateStyles::default(), &EN, 130, 34);
+        assert!(text.contains("5h 62%"), "detail 5h:\n{text}");
+        assert!(text.contains("7d 31%"), "detail 7d:\n{text}");
+        assert!(text.contains("sonnet 10%"), "detail sonnet:\n{text}");
+        assert!(text.contains("real"), "source 标签:\n{text}");
     }
 
     /// 会话:窗口.面板坐标（2026-07-12 用户验收增补）：同一 session 的多个
