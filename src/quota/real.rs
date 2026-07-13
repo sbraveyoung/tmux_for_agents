@@ -201,15 +201,42 @@ pub struct RealQuotaCell {
     pub usage: Option<(RealUsage, std::time::Instant)>,
 }
 
+/// quota_alert 迟滞（spec §9）：越过阈值触发一次即解除武装；回落到「阈值-5」
+/// 以下重新武装（5h 窗每 5 小时自然重置也会经由回落路径重武装）。阈值 0=关。
+#[derive(Default)]
+pub struct AlertArm { fired_5h: bool, fired_7d: bool }
+impl AlertArm {
+    pub fn evaluate(&mut self, alert_5h: u8, alert_7d: u8, u: &RealUsage)
+        -> Vec<(crate::notify::NotifyKind, String, String)> {
+        let mut out = Vec::new();
+        let mut window = |fired: &mut bool, threshold: u8, pct: f64, label: &str, resets_ms: u64| {
+            if threshold == 0 { return; }
+            let rearm = threshold.saturating_sub(5) as f64;
+            if *fired && pct < rearm { *fired = false; }
+            if !*fired && pct >= threshold as f64 {
+                *fired = true;
+                out.push((
+                    crate::notify::NotifyKind::QuotaAlert,
+                    format!("Claude {label} {}%", pct.round() as u8),
+                    format!("resets {}", crate::tui::view::fmt_local_hm(resets_ms)),
+                ));
+            }
+        };
+        window(&mut self.fired_5h, alert_5h, u.five_hour_pct, "5h", u.five_hour_resets_ms);
+        window(&mut self.fired_7d, alert_7d, u.seven_day_pct, "7d", u.seven_day_resets_ms);
+        out
+    }
+}
+
 /// fetcher 线程（spec §4）：仅 config.quota.real=true 时由 daemon spawn。
-/// 严格单飞：线程内串行 loop。alert 评估在 Task 6 接入（本任务 tx 仅占位持有）。
+/// 严格单飞：线程内串行 loop。
 pub fn spawn(
     cell: std::sync::Arc<std::sync::Mutex<RealQuotaCell>>,
     cfg: std::sync::Arc<std::sync::Mutex<crate::config::Config>>,
     tx: std::sync::mpsc::Sender<crate::notify::NotifyEvent>,
 ) {
     std::thread::spawn(move || {
-        let _tx = tx; // Task 6 (quota_alert) 接入
+        let mut arm = AlertArm::default();
         let mut token = read_credentials();
         let mut backoff = Backoff::new();
         loop {
@@ -228,6 +255,18 @@ pub fn spawn(
                     FetchOutcome::Ok(u) => {
                         backoff.on_success();
                         sleep_secs = backoff.delay_secs(base);
+                        // 先评估告警（借用 &u），再把 u 移入 cell——顺序对调是 `u` 被
+                        // move 进 cell 后不能再借用的编译必然结果，不影响语义：evaluate
+                        // 与写 cell 之间没有可观察的先后依赖（arm 只被本线程访问，
+                        // 两步都在下一次 sleep 前完成）。
+                        for (kind, title, body) in arm.evaluate(q.alert_5h, q.alert_7d, &u) {
+                            let _ = tx.send(crate::notify::NotifyEvent {
+                                session_key: "quota:claude".into(),
+                                pane_id: String::new(),
+                                session_name: None,
+                                kind, title, body,
+                            });
+                        }
                         cell.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
                             .usage = Some((u, std::time::Instant::now()));
                     }
@@ -484,5 +523,31 @@ mod tests {
         let empty = std::sync::Mutex::new(RealQuotaCell::default());
         let out = merge(vec![local_state()], &empty, 0);
         assert!(matches!(out[0].source, crate::quota::QuotaSource::LocalEstimate));
+    }
+
+    fn usage_pct(five: f64, seven: f64) -> RealUsage {
+        RealUsage { five_hour_pct: five, five_hour_resets_ms: 111, seven_day_pct: seven,
+                    seven_day_resets_ms: 222, seven_day_sonnet_pct: None, fetched_at_ms: 0 }
+    }
+
+    #[test]
+    fn alert_hysteresis_fires_once_and_rearms_below_band() {
+        let mut arm = AlertArm::default();
+        assert!(arm.evaluate(85, 90, &usage_pct(50.0, 50.0)).is_empty());
+        let fired = arm.evaluate(85, 90, &usage_pct(87.0, 50.0));
+        assert_eq!(fired.len(), 1, "5h 越过 85 触发一次");
+        assert!(arm.evaluate(85, 90, &usage_pct(88.0, 50.0)).is_empty(), "武装解除期不再触发");
+        assert!(arm.evaluate(85, 90, &usage_pct(83.0, 50.0)).is_empty(), "83 未低于 80，仍未武装");
+        assert!(arm.evaluate(85, 90, &usage_pct(79.0, 50.0)).is_empty(), "回落 <80 重新武装（本轮不触发）");
+        assert_eq!(arm.evaluate(85, 90, &usage_pct(86.0, 50.0)).len(), 1, "再次越过再触发");
+    }
+
+    #[test]
+    fn alert_both_windows_and_zero_disables() {
+        let mut arm = AlertArm::default();
+        let fired = arm.evaluate(85, 90, &usage_pct(90.0, 95.0));
+        assert_eq!(fired.len(), 2, "两窗同时越过各触发一条");
+        let mut off = AlertArm::default();
+        assert!(off.evaluate(0, 0, &usage_pct(99.0, 99.0)).is_empty(), "阈值 0=关");
     }
 }

@@ -11,10 +11,19 @@ pub enum NotifyKind {
     Done,
     Stale,
     Dead,
+    /// spec §9：quota 迟滞告警（`real::AlertArm`）。不经 Discipline 的会话状态判别式
+    /// 产生——`discipline::trigger_kind` 只从 `SessionState` 映射，永远不会输出该变体。
+    QuotaAlert,
 }
 impl NotifyKind {
     pub fn as_str(&self) -> &'static str {
-        match self { Self::WaitingInput => "waiting_input", Self::Done => "done", Self::Stale => "stale", Self::Dead => "dead" }
+        match self {
+            Self::WaitingInput => "waiting_input",
+            Self::Done => "done",
+            Self::Stale => "stale",
+            Self::Dead => "dead",
+            Self::QuotaAlert => "quota_alert",
+        }
     }
 }
 

@@ -73,9 +73,15 @@ fn macos_send(ev: &NotifyEvent) {
 
 fn tmux_send(ev: &NotifyEvent) {
     // display-message 到目标 pane；无 attached client 返回 no clients，静默吞；带硬超时。
+    // pane_id 为空（quota_alert 无 pane 语境，spec §9）时不带 `-t`：display-message
+    // 落到当前 client 所在 pane，而不是试图定位一个不存在的目标 pane。
     let mut c = std::process::Command::new("tmux");
     c.args(crate::paths::tmux_args());
-    c.args(["display-message", "-t", &ev.pane_id, &format!("[tfa] {}", ev.title)]);
+    if ev.pane_id.is_empty() {
+        c.args(["display-message", &format!("[tfa] {}", ev.title)]);
+    } else {
+        c.args(["display-message", "-t", &ev.pane_id, &format!("[tfa] {}", ev.title)]);
+    }
     run_capped(c);
 }
 

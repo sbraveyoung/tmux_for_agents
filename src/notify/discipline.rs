@@ -20,6 +20,11 @@ fn trigger_enabled(cfg: &NotifyConfig, kind: NotifyKind) -> bool {
         NotifyKind::Done => cfg.triggers.done,
         NotifyKind::Stale => cfg.triggers.stale,
         NotifyKind::Dead => cfg.triggers.dead,
+        // quota_alert 不经会话态判别式产生：`kind` 只能来自本函数唯一调用点
+        // `edges()` 里的 `trigger_kind(&s.state)`，其 match 覆盖 SessionState 的
+        // 全部变体且没有一支产出 QuotaAlert——到达这里即代码结构被破坏，宁可
+        // panic 暴露也不要静默返回一个没有对应 cfg.triggers 字段的假值。
+        NotifyKind::QuotaAlert => unreachable!("quota_alert bypasses Discipline; sent directly via real::AlertArm"),
     }
 }
 
@@ -135,6 +140,10 @@ impl Discipline {
                 NotifyKind::Done => (format!("{disp} 完成待 review"), "agent 已停下".into()),
                 NotifyKind::Stale => (format!("{disp} 卡住(stale)"), "长时间无活动".into()),
                 NotifyKind::Dead => (format!("{disp} 已退出(dead)"), "agent 进程结束".into()),
+                // 同上：kind 来自本轮 `new_kind`（= trigger_kind(&s.state)），
+                // 永不产出 QuotaAlert；这里的 disp/s 是会话身份，quota 告警的
+                // 文案由 real::AlertArm::evaluate 直接生成，不经过这条会话态格式化路径。
+                NotifyKind::QuotaAlert => unreachable!("quota_alert bypasses Discipline; sent directly via real::AlertArm"),
             };
             out.push(NotifyEvent { session_key: key, pane_id: s.pane_id.clone(), session_name: name,
                 kind, title, body });

@@ -260,6 +260,28 @@ Anthropic 的真实用量 API。请这样理解每个字段：
   `reset_at_ms`/`reset_estimated` 是过渡期的估算占位（`reset_estimated`
   在 M3 阶段恒为 `true`）。
 
+### 真实配额（可选开启）
+
+tfa 也可以轮询 Claude Code 自己的（非官方、无文档的）用量接口，拿到你
+真实的 5h/7d/7d-Sonnet 订阅百分比和重置时间，用的是本机已有的 OAuth
+token（优先 Keychain，其次 `~/.claude/.credentials.json` /
+`CLAUDE_CODE_OAUTH_TOKEN` 兜底）。在 `~/.config/tfa/config.toml` 里
+可选开启：
+
+```toml
+[quota]
+real = false               # 总开关：默认关，关=零 API/零 Keychain
+refresh_secs = 600         # 轮询间隔，下限 300
+status_bar_percent = false # 状态栏追加 5h% chip
+alert_5h = 85              # 5h 窗告警阈值，0=关
+alert_7d = 90              # 7d 窗告警阈值，0=关
+```
+
+风险声明：这是一个非官方接口，因此默认关闭，且轮询节奏温和（600 秒
+间隔，下限 300 秒，失败后进一步退避），把暴露降到最低。开启后，
+某个窗口越过告警阈值会触发恰好一条通知（走下面配置的通道，不会连环
+轰炸），并且要等用量回落到 `阈值 - 5`% 以下才会重新武装。
+
 ## 通知（M3）
 
 tfa 能在会话开始等你输入、完成、失联或退出时**主动通知你**——桌面

@@ -306,6 +306,30 @@ accordingly:
   `reset_at_ms`/`reset_estimated` are its estimated placeholders in
   the meantime (`reset_estimated` is always `true` in M3).
 
+### Real quota (opt-in)
+
+tfa can also poll Claude Code's own (unofficial, undocumented) usage
+endpoint for your real 5h/7d/7d-Sonnet subscription percentages and reset
+times, using the OAuth token already on this machine (Keychain first,
+with `~/.claude/.credentials.json` / `CLAUDE_CODE_OAUTH_TOKEN` as
+fallbacks). It's opt-in via `~/.config/tfa/config.toml`:
+
+```toml
+[quota]
+real = false               # master switch: default off, off = zero API/zero Keychain
+refresh_secs = 600         # poll interval, floor 300
+status_bar_percent = false # append 5h% chip to the status bar
+alert_5h = 85              # 5h window alert threshold, 0 = off
+alert_7d = 90              # 7d window alert threshold, 0 = off
+```
+
+Risk: this is a non-official endpoint, so it's off by default and polls
+gently (600s interval, 300s floor, backing off further on any failure)
+to keep exposure low. When enabled, a window crossing its alert
+threshold fires exactly one notification through the channels
+configured below (not a repeat storm), and it only re-arms once usage
+falls back below `threshold - 5`%.
+
 ## Notifications (M3)
 
 tfa can proactively notify you — desktop notification, tmux status
